@@ -1937,6 +1937,7 @@ func TestInjectRuntimeConfigQuickCreateOutputPrefixAgnostic(t *testing.T) {
 
 	for _, want := range []string{
 		"quick-create task",
+		"$MULTICA_CLI_PATH",
 		"Created <identifier-or-id>: <title>",
 		"identifier` from JSON output",
 		"Do not assume any workspace issue prefix",

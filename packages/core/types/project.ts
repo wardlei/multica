@@ -21,6 +21,7 @@ export interface Project {
   issue_count: number;
   done_count: number;
   resource_count: number;
+  default_code_worktree_id: string | null;
 }
 
 export interface CreateProjectRequest {
@@ -114,4 +115,60 @@ export interface UpdateProjectResourceRequest {
 export interface ListProjectResourcesResponse {
   resources: ProjectResource[];
   total: number;
+}
+
+// CodeWorktree is a daemon-owned Git checkout selected as a project's explicit
+// execution context. It is intentionally separate from the legacy
+// local_directory resource because task launch needs immutable Git facts.
+export interface CodeWorktree {
+  id: string;
+  workspace_id: string;
+  daemon_id: string;
+  local_path: string;
+  canonical_path: string;
+  repository_url: string;
+  branch: string;
+  head_sha: string;
+  is_dirty: boolean;
+  inspected_at: string;
+  updated_at: string;
+}
+
+export interface ListCodeWorktreesResponse {
+  worktrees: CodeWorktree[];
+  total: number;
+}
+
+export interface CodeWorktreeInspection {
+  id: string;
+  daemon_id: string;
+  local_path: string;
+  worktree_id: string | null;
+  status: "pending" | "completed" | "failed" | "expired" | "consumed" | string;
+  canonical_path: string | null;
+  repository_url: string | null;
+  branch: string | null;
+  head_sha: string | null;
+  is_dirty: boolean | null;
+  error: string | null;
+  expires_at: string;
+  completed_at: string | null;
+}
+
+export interface CreateCodeWorktreeInspectionRequest {
+  daemon_id: string;
+  local_path: string;
+  worktree_id?: string;
+}
+
+export interface CreateCodeWorktreeRequest {
+  inspection_id: string;
+}
+
+export interface RefreshCodeWorktreeRequest {
+  inspection_id: string;
+}
+
+export interface SetProjectCodeWorktreeRequest {
+  worktree_id: string | null;
 }

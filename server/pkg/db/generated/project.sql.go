@@ -23,13 +23,24 @@ func (q *Queries) CountIssuesByProject(ctx context.Context, projectID pgtype.UUI
 	return count, err
 }
 
+const countProjectsUsingCodeWorktree = `-- name: CountProjectsUsingCodeWorktree :one
+SELECT count(*) FROM project WHERE default_code_worktree_id = $1
+`
+
+func (q *Queries) CountProjectsUsingCodeWorktree(ctx context.Context, defaultCodeWorktreeID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countProjectsUsingCodeWorktree, defaultCodeWorktreeID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createProject = `-- name: CreateProject :one
 INSERT INTO project (
     workspace_id, title, description, icon, status,
     lead_type, lead_id, priority, start_date, due_date
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-) RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date
+) RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id
 `
 
 type CreateProjectParams struct {
@@ -73,6 +84,7 @@ func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (P
 		&i.Priority,
 		&i.StartDate,
 		&i.DueDate,
+		&i.DefaultCodeWorktreeID,
 	)
 	return i, err
 }
@@ -93,7 +105,7 @@ func (q *Queries) DeleteProject(ctx context.Context, arg DeleteProjectParams) er
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date FROM project
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id FROM project
 WHERE id = $1
 `
 
@@ -114,12 +126,13 @@ func (q *Queries) GetProject(ctx context.Context, id pgtype.UUID) (Project, erro
 		&i.Priority,
 		&i.StartDate,
 		&i.DueDate,
+		&i.DefaultCodeWorktreeID,
 	)
 	return i, err
 }
 
 const getProjectInWorkspace = `-- name: GetProjectInWorkspace :one
-SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date FROM project
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id FROM project
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -145,6 +158,7 @@ func (q *Queries) GetProjectInWorkspace(ctx context.Context, arg GetProjectInWor
 		&i.Priority,
 		&i.StartDate,
 		&i.DueDate,
+		&i.DefaultCodeWorktreeID,
 	)
 	return i, err
 }
@@ -185,7 +199,7 @@ func (q *Queries) GetProjectIssueStats(ctx context.Context, projectIds []pgtype.
 }
 
 const listProjects = `-- name: ListProjects :many
-SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date FROM project
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id FROM project
 WHERE workspace_id = $1
   AND ($2::text IS NULL OR status = $2)
   AND ($3::text IS NULL OR priority = $3)
@@ -221,6 +235,7 @@ func (q *Queries) ListProjects(ctx context.Context, arg ListProjectsParams) ([]P
 			&i.Priority,
 			&i.StartDate,
 			&i.DueDate,
+			&i.DefaultCodeWorktreeID,
 		); err != nil {
 			return nil, err
 		}
@@ -252,6 +267,37 @@ func (q *Queries) LockProjectForChatSessionCreate(ctx context.Context, arg LockP
 	return id, err
 }
 
+const lockProjectForCodeWorktree = `-- name: LockProjectForCodeWorktree :one
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id FROM project WHERE id = $1 AND workspace_id = $2 FOR UPDATE
+`
+
+type LockProjectForCodeWorktreeParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) LockProjectForCodeWorktree(ctx context.Context, arg LockProjectForCodeWorktreeParams) (Project, error) {
+	row := q.db.QueryRow(ctx, lockProjectForCodeWorktree, arg.ID, arg.WorkspaceID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Icon,
+		&i.Status,
+		&i.LeadType,
+		&i.LeadID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Priority,
+		&i.StartDate,
+		&i.DueDate,
+		&i.DefaultCodeWorktreeID,
+	)
+	return i, err
+}
+
 const lockProjectForDelete = `-- name: LockProjectForDelete :one
 SELECT id FROM project
 WHERE id = $1 AND workspace_id = $2
@@ -272,6 +318,39 @@ func (q *Queries) LockProjectForDelete(ctx context.Context, arg LockProjectForDe
 	return id, err
 }
 
+const setProjectDefaultCodeWorktree = `-- name: SetProjectDefaultCodeWorktree :one
+UPDATE project SET default_code_worktree_id = $3, updated_at = now()
+WHERE id = $1 AND workspace_id = $2 RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id
+`
+
+type SetProjectDefaultCodeWorktreeParams struct {
+	ID                    pgtype.UUID `json:"id"`
+	WorkspaceID           pgtype.UUID `json:"workspace_id"`
+	DefaultCodeWorktreeID pgtype.UUID `json:"default_code_worktree_id"`
+}
+
+func (q *Queries) SetProjectDefaultCodeWorktree(ctx context.Context, arg SetProjectDefaultCodeWorktreeParams) (Project, error) {
+	row := q.db.QueryRow(ctx, setProjectDefaultCodeWorktree, arg.ID, arg.WorkspaceID, arg.DefaultCodeWorktreeID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Icon,
+		&i.Status,
+		&i.LeadType,
+		&i.LeadID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Priority,
+		&i.StartDate,
+		&i.DueDate,
+		&i.DefaultCodeWorktreeID,
+	)
+	return i, err
+}
+
 const updateProject = `-- name: UpdateProject :one
 UPDATE project SET
     title = COALESCE($2, title),
@@ -285,7 +364,7 @@ UPDATE project SET
     due_date = $10,
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date
+RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, default_code_worktree_id
 `
 
 type UpdateProjectParams struct {
@@ -329,6 +408,7 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (P
 		&i.Priority,
 		&i.StartDate,
 		&i.DueDate,
+		&i.DefaultCodeWorktreeID,
 	)
 	return i, err
 }

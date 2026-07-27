@@ -13,6 +13,16 @@ WHERE id = $1;
 SELECT * FROM project
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: SetProjectDefaultCodeWorktree :one
+UPDATE project SET default_code_worktree_id = sqlc.narg(default_code_worktree_id), updated_at = now()
+WHERE id = $1 AND workspace_id = $2 RETURNING *;
+
+-- name: CountProjectsUsingCodeWorktree :one
+SELECT count(*) FROM project WHERE default_code_worktree_id = $1;
+
+-- name: LockProjectForCodeWorktree :one
+SELECT * FROM project WHERE id = $1 AND workspace_id = $2 FOR UPDATE;
+
 -- name: LockProjectForChatSessionCreate :one
 -- Conflicts with project deletion so a chat session cannot commit a soft
 -- project reference after the delete transaction has swept existing sessions.

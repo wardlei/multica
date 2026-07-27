@@ -117,6 +117,25 @@
     "local_validate_not_writable": "디렉터리에 쓸 수 없습니다.",
     "local_validate_unsupported": "로컬 디렉터리는 데스크톱 앱에서만 선택할 수 있습니다."
   },
+  "worktree": {
+    "section_header": "코드 worktree",
+    "empty": "실행 디렉터리가 선택되지 않았습니다. 에이전트는 관리형 실행 환경을 사용합니다.",
+    "choose": "worktree 및 브랜치 선택",
+    "use_existing": "{{path}} ({{branch}}) 사용",
+    "refresh": "새로고침",
+    "unbind": "연결 해제",
+    "dirty_hint": "로컬 변경 사항이 감지되었습니다. task 를 실행하기 전에 새로고침하세요.",
+    "daemon_required": "코드 worktree 를 선택하기 전에 로컬 daemon 을 시작하세요.",
+    "daemon_offline_hint": "worktree 를 선택하려면 로컬 daemon 을 시작하세요.",
+    "web_read_only_hint": "이 worktree 는 등록된 머신의 데스크톱 앱에서만 변경할 수 있습니다.",
+    "inspect_create_failed": "Git 검사를 만들 수 없습니다.",
+    "inspect_incomplete": "Git 검사가 완료되지 않았습니다.",
+    "invalid_response": "서버에서 유효하지 않은 코드 worktree 를 반환했습니다.",
+    "toast_bound": "코드 worktree 를 이 프로젝트에 연결했습니다.",
+    "toast_bind_failed": "코드 worktree 를 연결할 수 없습니다.",
+    "toast_refreshed": "코드 worktree 를 새로고침했습니다.",
+    "toast_refresh_failed": "코드 worktree 를 새로고침할 수 없습니다."
+  },
   "delete_dialog": {
     "title": "프로젝트 삭제",
     "description": "프로젝트가 삭제됩니다. 이슈는 삭제되지 않지만 프로젝트 연결은 해제됩니다.",

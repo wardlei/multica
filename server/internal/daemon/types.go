@@ -75,6 +75,7 @@ type Task struct {
 	ProjectTitle             string                 `json:"project_title,omitempty"`               // human-readable project title for context injection
 	ProjectDescription       string                 `json:"project_description,omitempty"`         // durable project-level context injected into the brief
 	ProjectResources         []ProjectResourceData  `json:"project_resources,omitempty"`           // project-scoped resources to expose to the agent
+	WorktreeContext          json.RawMessage        `json:"worktree_context,omitempty"`            // immutable expected local Git checkout
 	IsLeaderTask             bool                   `json:"is_leader_task,omitempty"`              // true when executing in the squad-leader coordinator role
 	PriorSessionID           string                 `json:"prior_session_id,omitempty"`            // Claude session ID from a previous task on this issue
 	PriorWorkDir             string                 `json:"prior_work_dir,omitempty"`              // work_dir from a previous task on this issue

@@ -795,6 +795,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/workspaces", h.ListDaemonWorkspaces)
 		r.Get("/workspaces/{workspaceId}/repos", h.GetDaemonWorkspaceRepos)
 		r.Get("/workspaces/{workspaceId}/runtime-profiles", h.DaemonListRuntimeProfiles)
+		r.Post("/code-worktree-inspections/{id}/complete", h.CompleteCodeWorktreeInspection)
 
 		r.Post("/runtimes/{runtimeId}/tasks/claim", h.ClaimTaskByRuntime)
 		// Canonical machine-level batch claim (MUL-4257). `/claim` is a
@@ -1138,6 +1139,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			})
 
 			// Projects
+			r.Route("/api/code-worktrees", func(r chi.Router) {
+				r.Get("/", h.ListCodeWorktrees)
+				r.Post("/", h.CreateCodeWorktree)
+				r.Post("/inspections", h.CreateCodeWorktreeInspection)
+				r.Get("/inspections/{id}", h.GetCodeWorktreeInspection)
+				r.Get("/{id}", h.GetCodeWorktree)
+				r.Put("/{id}", h.RefreshCodeWorktree)
+				r.Delete("/{id}", h.DeleteCodeWorktree)
+			})
 			r.Route("/api/projects", func(r chi.Router) {
 				r.Get("/search", h.SearchProjects)
 				r.Get("/", h.ListProjects)
@@ -1146,6 +1156,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/", h.GetProject)
 					r.Put("/", h.UpdateProject)
 					r.Delete("/", h.DeleteProject)
+					r.Put("/code-worktree", h.SetProjectCodeWorktree)
 					r.Get("/resources", h.ListProjectResources)
 					r.Post("/resources", h.CreateProjectResource)
 					r.Put("/resources/{resourceId}", h.UpdateProjectResource)

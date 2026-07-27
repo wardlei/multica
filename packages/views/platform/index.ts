@@ -11,6 +11,7 @@ export {
 } from "./local-directory";
 export {
   useLocalDaemonStatus,
+  inspectLocalCodeWorktree,
   type LocalDaemonStatus,
 } from "./use-local-daemon-status";
 export {

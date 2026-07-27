@@ -118,6 +118,25 @@
     "local_validate_not_writable": "Directory is not writable.",
     "local_validate_unsupported": "Local directories can only be picked on the desktop app."
   },
+  "worktree": {
+    "section_header": "Code worktree",
+    "empty": "No execution directory is selected. Agents use their managed environment.",
+    "choose": "Choose worktree and branch",
+    "use_existing": "Use {{path}} ({{branch}})",
+    "refresh": "Refresh",
+    "unbind": "Unbind",
+    "dirty_hint": "Local changes detected; refresh before running a task.",
+    "daemon_required": "Start the local daemon before selecting a code worktree.",
+    "daemon_offline_hint": "Start the local daemon to select a worktree.",
+    "web_read_only_hint": "This worktree can only be changed from the desktop app on its registered machine.",
+    "inspect_create_failed": "Could not create the Git inspection.",
+    "inspect_incomplete": "Git inspection did not complete.",
+    "invalid_response": "Server returned an invalid code worktree.",
+    "toast_bound": "Code worktree bound to this project.",
+    "toast_bind_failed": "Could not bind code worktree.",
+    "toast_refreshed": "Code worktree refreshed.",
+    "toast_refresh_failed": "Could not refresh code worktree."
+  },
   "delete_dialog": {
     "title": "Delete project",
     "description": "This will delete the project. Issues will not be deleted but will be unlinked.",

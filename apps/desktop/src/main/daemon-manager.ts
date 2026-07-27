@@ -395,6 +395,37 @@ async function fetchHealth(): Promise<DaemonStatus> {
   };
 }
 
+async function inspectCodeWorktree(
+  inspectionId: string,
+  localPath: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!inspectionId.trim() || !localPath.trim()) {
+    return { ok: false, error: "inspection_id and local_path are required" };
+  }
+  const status = await fetchHealth();
+  if (status.state !== "running") {
+    return { ok: false, error: "Local daemon is not running" };
+  }
+  const active = await ensureActiveProfile();
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const response = await fetch(`http://127.0.0.1:${active.port}/code-worktree/inspect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inspection_id: inspectionId, local_path: localPath }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (response.ok) {
+      return { ok: true };
+    }
+    return { ok: false, error: (await response.text()).trim() || "Git inspection failed" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Could not reach local daemon" };
+  }
+}
+
 function findCliOnPath(): string | null {
   const candidates = process.platform === "win32" ? ["multica.exe"] : ["multica"];
   const paths = (process.env["PATH"] ?? "").split(
@@ -1168,6 +1199,11 @@ export function setupDaemonManager(
   ipcMain.handle("daemon:stop", () => withGuard(() => stopDaemon()));
   ipcMain.handle("daemon:restart", () => withGuard(() => restartDaemon()));
   ipcMain.handle("daemon:get-status", () => fetchHealth());
+  ipcMain.handle(
+    "daemon:inspect-code-worktree",
+    (_event, inspectionId: string, localPath: string) =>
+      inspectCodeWorktree(inspectionId, localPath),
+  );
   ipcMain.handle("daemon:probe-runtimes", () => probeLocalRuntimes());
   // The host's OS name, available regardless of daemon state. The Runtimes
   // page uses it as a fallback identity for "this machine" when no

@@ -41,6 +41,13 @@ import type {
   TimelineEntry,
   User,
   WebhookDelivery,
+  Project,
+  ListProjectsResponse,
+  ProjectResource,
+  ListProjectResourcesResponse,
+  CodeWorktree,
+  ListCodeWorktreesResponse,
+  CodeWorktreeInspection,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
@@ -523,7 +530,7 @@ export const EMPTY_SEARCH_ISSUES_RESPONSE: SearchIssuesResponse = {
   total: 0,
 };
 
-const ProjectSchema = z.object({
+export const ProjectSchema = z.object({
   id: z.string(),
   workspace_id: z.string(),
   title: z.string(),
@@ -543,7 +550,104 @@ const ProjectSchema = z.object({
   issue_count: z.number().default(0),
   done_count: z.number().default(0),
   resource_count: z.number().default(0),
+  default_code_worktree_id: z.string().nullable().default(null),
 }).loose();
+
+export const ListProjectsResponseSchema = z.object({
+  projects: z.array(ProjectSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_PROJECTS_RESPONSE: ListProjectsResponse = {
+  projects: [],
+  total: 0,
+};
+
+export const EMPTY_PROJECT: Project = {
+  id: "", workspace_id: "", title: "", description: null, icon: null,
+  status: "planned", priority: "none", lead_type: null, lead_id: null,
+  start_date: null, due_date: null, created_at: "", updated_at: "",
+  issue_count: 0, done_count: 0, resource_count: 0, default_code_worktree_id: null,
+};
+
+export const ProjectResourceSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  workspace_id: z.string(),
+  resource_type: z.string(),
+  resource_ref: z.record(z.string(), z.unknown()).default({}),
+  label: z.string().nullable(),
+  position: z.number(),
+  created_at: z.string(),
+  created_by: z.string().nullable(),
+}).loose();
+
+export const ListProjectResourcesResponseSchema = z.object({
+  resources: z.array(ProjectResourceSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_PROJECT_RESOURCES_RESPONSE: ListProjectResourcesResponse = {
+  resources: [],
+  total: 0,
+};
+
+export const EMPTY_PROJECT_RESOURCE: ProjectResource = {
+  id: "", project_id: "", workspace_id: "", resource_type: "github_repo",
+  resource_ref: {}, label: null, position: 0, created_at: "", created_by: null,
+};
+
+export const CodeWorktreeSchema: z.ZodType<CodeWorktree> = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  daemon_id: z.string(),
+  local_path: z.string(),
+  canonical_path: z.string(),
+  repository_url: z.string(),
+  branch: z.string(),
+  head_sha: z.string(),
+  is_dirty: z.boolean(),
+  inspected_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const ListCodeWorktreesResponseSchema: z.ZodType<ListCodeWorktreesResponse> = z.object({
+  worktrees: z.array(CodeWorktreeSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_CODE_WORKTREES_RESPONSE: ListCodeWorktreesResponse = {
+  worktrees: [],
+  total: 0,
+};
+
+export const EMPTY_CODE_WORKTREE: CodeWorktree = {
+  id: "", workspace_id: "", daemon_id: "", local_path: "", canonical_path: "",
+  repository_url: "", branch: "", head_sha: "", is_dirty: false,
+  inspected_at: "", updated_at: "",
+};
+
+export const CodeWorktreeInspectionSchema: z.ZodType<CodeWorktreeInspection> = z.object({
+  id: z.string(),
+  daemon_id: z.string(),
+  local_path: z.string(),
+  worktree_id: z.string().nullable().default(null),
+  status: z.string(),
+  canonical_path: z.string().nullable().default(null),
+  repository_url: z.string().nullable().default(null),
+  branch: z.string().nullable().default(null),
+  head_sha: z.string().nullable().default(null),
+  is_dirty: z.boolean().nullable().default(null),
+  error: z.string().nullable().default(null),
+  expires_at: z.string(),
+  completed_at: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_CODE_WORKTREE_INSPECTION: CodeWorktreeInspection = {
+  id: "", daemon_id: "", local_path: "", worktree_id: null, status: "failed",
+  canonical_path: null, repository_url: null, branch: null, head_sha: null,
+  is_dirty: null, error: null, expires_at: "", completed_at: null,
+};
 
 const SearchProjectResultSchema = ProjectSchema.extend({
   match_source: z.string(),

@@ -116,6 +116,10 @@ interface DaemonAPI {
   stop: () => Promise<{ success: boolean; error?: string }>;
   restart: () => Promise<{ success: boolean; error?: string }>;
   getStatus: () => Promise<DaemonStatus>;
+  inspectCodeWorktree: (
+    inspectionId: string,
+    localPath: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   probeRuntimes: () => Promise<LocalRuntimeProbe>;
   getHostName: () => Promise<string>;
   onStatusChange: (callback: (status: DaemonStatus) => void) => () => void;

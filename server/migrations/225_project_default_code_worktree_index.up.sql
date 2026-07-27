@@ -1,0 +1,1 @@
+CREATE INDEX CONCURRENTLY idx_project_default_code_worktree ON project(default_code_worktree_id) WHERE default_code_worktree_id IS NOT NULL;

@@ -245,13 +245,13 @@ func writeAvailableCommands(b *strings.Builder) {
 
 // writeAvailableCommandsQuickCreate emits a minimal Available Commands
 // section for quick-create runs. Quick-create's hard guardrails forbid
-// every CLI other than `multica issue create`, so listing more would just
+// every CLI other than the issue-create command, so listing more would just
 // tempt the model to bend the guardrail.
 func writeAvailableCommandsQuickCreate(b *strings.Builder) {
 	b.WriteString("## Available Commands\n\n")
-	b.WriteString("**Use `--output json` for structured data.** For anything beyond `issue create`, run `multica --help` or `multica <command> --help`.\n\n")
+	b.WriteString("**Use `--output json` for structured data.** Run every Multica CLI command as `\"$MULTICA_CLI_PATH\"`; do not use bare `multica`, because login shells can replace PATH. For anything beyond `issue create`, run `\"$MULTICA_CLI_PATH\" --help` or `\"$MULTICA_CLI_PATH\" <command> --help`.\n\n")
 	b.WriteString("### Core\n")
-	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. For agent-authored long descriptions, prefer `--description-file <path>` over `--description-stdin` (flags after a HEREDOC terminator can be silently swallowed, #4182). Write that file inside your working directory (e.g. `./description.md`), never `/tmp` or shared paths, and treat a failed write as fatal — the CLI rejects a path outside the workdir so a stale file from another run can't leak in (MUL-4252).\n\n")
+	b.WriteString("- `\"$MULTICA_CLI_PATH\" issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. For agent-authored long descriptions, prefer `--description-file <path>` over `--description-stdin` (flags after a HEREDOC terminator can be silently swallowed, #4182). Write that file inside your working directory (e.g. `./description.md`), never `/tmp` or shared paths, and treat a failed write as fatal — the CLI rejects a path outside the workdir so a stale file from another run can't leak in (MUL-4252).\n\n")
 }
 
 // writeCommentFormatting emits the cross-platform file-first guardrail.
@@ -385,8 +385,9 @@ func writeWorkflowChat(b *strings.Builder) {
 func writeWorkflowQuickCreate(b *strings.Builder) {
 	b.WriteString("**This task was triggered by quick-create.** There is NO existing Multica issue. Follow the field and output rules in the user message you just received; ignore the default assignment-task workflow.\n\n")
 	b.WriteString("Hard guardrails (apply even if the user message is missing):\n")
-	b.WriteString("- Run exactly one `multica issue create` invocation, then exit.\n")
-	b.WriteString("- Do NOT call `multica issue get`, `multica issue status`, or `multica issue comment add` for this task — there is no issue to query, transition, or comment on. The platform writes the user's success/failure inbox notification automatically based on whether `multica issue create` succeeded.\n")
+	b.WriteString("- Use `\"$MULTICA_CLI_PATH\"` for every Multica CLI call; never a bare `multica` command, because login shells can replace PATH.\n")
+	b.WriteString("- Run exactly one `\"$MULTICA_CLI_PATH\" issue create` invocation, then exit.\n")
+	b.WriteString("- Do NOT call `\"$MULTICA_CLI_PATH\" issue get`, `\"$MULTICA_CLI_PATH\" issue status`, or `\"$MULTICA_CLI_PATH\" issue comment add` for this task — there is no issue to query, transition, or comment on. The platform writes the user's success/failure inbox notification automatically based on whether the issue-create command succeeded.\n")
 	b.WriteString("- If the CLI returns an error, exit with that error as the only output. Do not retry.\n\n")
 }
 
@@ -596,11 +597,11 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 		b.WriteString("This is a run-only autopilot task, so there may be no issue comment to post. Your final assistant output is captured automatically as the autopilot run result. Keep it concise and state the outcome.\n\n")
 		b.WriteString("**Delivering files here:** this surface is text-only — the run result carries no attachments. Describe what you produced; do not link its path.\n")
 	case kindQuickCreate:
-		b.WriteString("This is a quick-create task. There is NO existing issue to comment on. Your final stdout is captured automatically and the platform writes the user's success/failure inbox notification based on whether `multica issue create` succeeded.\n\n")
-		b.WriteString("- Do NOT call `multica issue comment add` — the issue you just created has no conversation context for this run.\n")
-		b.WriteString("- Print exactly one final line: `Created <identifier-or-id>: <title>` after a successful `multica issue create`. Use the created issue's `identifier` from JSON output when available; otherwise use its `id`. Do not assume any workspace issue prefix such as `MUL-`; workspaces can use custom prefixes.\n")
+		b.WriteString("This is a quick-create task. There is NO existing issue to comment on. Your final stdout is captured automatically and the platform writes the user's success/failure inbox notification based on whether `\"$MULTICA_CLI_PATH\" issue create` succeeded.\n\n")
+		b.WriteString("- Do NOT call `\"$MULTICA_CLI_PATH\" issue comment add` — the issue you just created has no conversation context for this run.\n")
+		b.WriteString("- Print exactly one final line: `Created <identifier-or-id>: <title>` after a successful `\"$MULTICA_CLI_PATH\" issue create`. Use the created issue's `identifier` from JSON output when available; otherwise use its `id`. Do not assume any workspace issue prefix such as `MUL-`; workspaces can use custom prefixes.\n")
 		b.WriteString("- On CLI failure, exit with the CLI error as the only output. The platform translates that into a `quick_create_failed` inbox item carrying the original prompt for the user.\n\n")
-		b.WriteString("**Delivering files here:** your stdout is text-only. A file that belongs to the new issue goes on the `multica issue create` call itself via `--attachment <path>`; never put its path in the description or in your stdout line.\n")
+		b.WriteString("**Delivering files here:** your stdout is text-only. A file that belongs to the new issue goes on the `\"$MULTICA_CLI_PATH\" issue create` call itself via `--attachment <path>`; never put its path in the description or in your stdout line.\n")
 	case kindChat:
 		b.WriteString("This is a chat session. Your reply is delivered directly to the chat window the user is reading.\n\n")
 		// Two-layer channel policy (MUL-4899). This is the DELIVERY layer: any

@@ -123,6 +123,13 @@ export type {
   CreateProjectResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
+  CodeWorktree,
+  ListCodeWorktreesResponse,
+  CodeWorktreeInspection,
+  CreateCodeWorktreeInspectionRequest,
+  CreateCodeWorktreeRequest,
+  RefreshCodeWorktreeRequest,
+  SetProjectCodeWorktreeRequest,
 } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
 export type {

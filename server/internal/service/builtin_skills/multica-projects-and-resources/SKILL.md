@@ -31,6 +31,11 @@ Common resource types:
 - `github_repo` — durable GitHub repo context, with `resource_ref.url`, optional checkout `ref`, and optional prompt-only `default_branch_hint`;
 - `local_directory` — daemon-local path context, with `resource_ref.local_path`, `daemon_id`, and optional label.
 
+A project can also select one verified **code worktree**. Unlike a resource,
+it is an existing Git checkout with a daemon-verified repository, branch, HEAD,
+and clean-state snapshot. New issue tasks copy this execution context and the
+owning daemon rechecks it before launching an agent.
+
 ## CLI
 
 ```bash
@@ -49,6 +54,11 @@ multica project resource add <project-id> --type local_directory --local-path <a
 multica project resource update <project-id> <resource-id> --url <new-github-url> --output json
 multica project resource update <project-id> <resource-id> --ref <branch-or-sha> --output json
 multica project resource remove <project-id> <resource-id> --output json
+multica worktree inspect --local-path <abs-path> --daemon-id <daemon-id>
+multica worktree add --inspection <inspection-id>
+multica worktree list --output json
+multica project worktree set <project-id> <worktree-id>
+multica project worktree set <project-id> none
 ```
 
 For `github_repo`, non-JSON `--ref` sets `resource_ref.ref`, the default checkout branch/tag/SHA for future tasks in that project. JSON `--ref '<json>'` remains the escape hatch for full payloads or resource types not covered by shortcuts.
@@ -61,6 +71,13 @@ Add/update a project resource when the user asks for durable project context: "�
 
 Project resources are durable and affect future tasks. `multica repo checkout`
 is task-local checkout state.
+
+Use `multica worktree inspect` followed by `multica worktree add` when the
+user explicitly chooses an existing checkout and branch as the project's agent
+execution directory. Inspection is read-only: it never checks out, resets,
+cleans, pulls, or creates a branch. A code worktree and a `local_directory`
+resource cannot target the same daemon on one project; remove or migrate the
+older local-directory binding first.
 
 ## Debugging wrong context
 

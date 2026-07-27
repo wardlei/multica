@@ -117,6 +117,25 @@
     "local_validate_not_writable": "目录不可写。",
     "local_validate_unsupported": "本地目录仅能在桌面端选择。"
   },
+  "worktree": {
+    "section_header": "代码 worktree",
+    "empty": "尚未选择执行目录。智能体会使用托管的执行环境。",
+    "choose": "选择 worktree 和分支",
+    "use_existing": "使用 {{path}}（{{branch}}）",
+    "refresh": "刷新",
+    "unbind": "解绑",
+    "dirty_hint": "检测到本地改动；请先刷新，再运行 task。",
+    "daemon_required": "请先启动本地守护进程，再选择代码 worktree。",
+    "daemon_offline_hint": "启动本地守护进程后才能选择 worktree。",
+    "web_read_only_hint": "只能在已注册该 worktree 的电脑上通过桌面端修改。",
+    "inspect_create_failed": "无法创建 Git 检查。",
+    "inspect_incomplete": "Git 检查没有完成。",
+    "invalid_response": "服务器返回了无效的代码 worktree。",
+    "toast_bound": "已将代码 worktree 绑定到此项目。",
+    "toast_bind_failed": "无法绑定代码 worktree。",
+    "toast_refreshed": "代码 worktree 已刷新。",
+    "toast_refresh_failed": "无法刷新代码 worktree。"
+  },
   "delete_dialog": {
     "title": "删除项目",
     "description": "将删除这个项目。issue 不会被删除，只会从项目中解除关联。",

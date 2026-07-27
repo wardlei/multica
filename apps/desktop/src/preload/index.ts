@@ -235,6 +235,8 @@ const daemonAPI = {
     ipcRenderer.invoke("daemon:restart"),
   getStatus: (): Promise<DaemonStatus> =>
     ipcRenderer.invoke("daemon:get-status"),
+  inspectCodeWorktree: (inspectionId: string, localPath: string) =>
+    ipcRenderer.invoke("daemon:inspect-code-worktree", inspectionId, localPath),
   probeRuntimes: (): Promise<LocalRuntimeProbe> =>
     ipcRenderer.invoke("daemon:probe-runtimes"),
   getHostName: (): Promise<string> =>

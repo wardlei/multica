@@ -63,6 +63,18 @@ var projectResourceCmd = &cobra.Command{
 	Short: "Manage resources attached to a project",
 }
 
+var projectWorktreeCmd = &cobra.Command{
+	Use:   "worktree",
+	Short: "Set the project's code worktree",
+}
+
+var projectWorktreeSetCmd = &cobra.Command{
+	Use:   "set <project-id> <worktree-id>",
+	Short: "Bind a code worktree to a project; pass none to unbind",
+	Args:  exactArgs(2),
+	RunE:  runProjectWorktreeSet,
+}
+
 var projectResourceListCmd = &cobra.Command{
 	Use:   "list <project-id>",
 	Short: "List resources attached to a project",
@@ -115,11 +127,13 @@ func init() {
 	projectCmd.AddCommand(projectDeleteCmd)
 	projectCmd.AddCommand(projectStatusCmd)
 	projectCmd.AddCommand(projectResourceCmd)
+	projectCmd.AddCommand(projectWorktreeCmd)
 
 	projectResourceCmd.AddCommand(projectResourceListCmd)
 	projectResourceCmd.AddCommand(projectResourceAddCmd)
 	projectResourceCmd.AddCommand(projectResourceUpdateCmd)
 	projectResourceCmd.AddCommand(projectResourceRemoveCmd)
+	projectWorktreeCmd.AddCommand(projectWorktreeSetCmd)
 
 	// project list
 	projectListCmd.Flags().String("output", "table", "Output format: table or json")
@@ -381,6 +395,29 @@ func runProjectCreate(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	return cli.PrintJSON(os.Stdout, result)
+}
+
+func runProjectWorktreeSet(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+	projectRef, err := resolveProjectID(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+	worktreeID := strings.TrimSpace(args[1])
+	var value any = worktreeID
+	if strings.EqualFold(worktreeID, "none") {
+		value = nil
+	}
+	var result map[string]any
+	if err := client.PutJSON(ctx, "/api/projects/"+projectRef.ID+"/code-worktree", map[string]any{"worktree_id": value}, &result); err != nil {
+		return fmt.Errorf("set project code worktree: %w", err)
+	}
 	return cli.PrintJSON(os.Stdout, result)
 }
 

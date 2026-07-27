@@ -322,6 +322,17 @@ func (c *Client) StartTask(ctx context.Context, taskID string) error {
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/start", taskID), map[string]any{}, nil)
 }
 
+// CompleteCodeWorktreeInspection forwards locally observed Git facts using
+// the daemon credential; desktop and CLI callers never send these facts to
+// the server directly.
+func (c *Client) CompleteCodeWorktreeInspection(ctx context.Context, inspectionID string, result codeWorktreeInspection, inspectionErr error) error {
+	body := map[string]any{"canonical_path": result.CanonicalPath, "repository_url": result.RepositoryURL, "branch": result.Branch, "head_sha": result.HeadSHA, "is_dirty": result.IsDirty}
+	if inspectionErr != nil {
+		body["error"] = inspectionErr.Error()
+	}
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/code-worktree-inspections/%s/complete", inspectionID), body, nil)
+}
+
 // MarkTaskWaitingLocalDirectory parks a freshly-dispatched task in the
 // waiting_local_directory state on the server. The daemon calls this after
 // it has claimed a task whose project carries a local_directory resource

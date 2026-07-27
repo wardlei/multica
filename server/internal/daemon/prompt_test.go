@@ -36,7 +36,8 @@ func TestBuildQuickCreatePromptRules(t *testing.T) {
 		// use custom issue prefixes, so a successful issue creation should
 		// not look failed merely because the identifier does not match one
 		// fixed prefix.
-		"multica issue create --output json",
+		"$MULTICA_CLI_PATH",
+		"\"$MULTICA_CLI_PATH\" issue create --output json",
 		"JSON response",
 		"identifier",
 		"Do not scrape human output",
@@ -61,7 +62,7 @@ func TestBuildQuickCreatePromptRules(t *testing.T) {
 func TestBuildQuickCreatePromptAssigneeIncludesSquads(t *testing.T) {
 	out := buildQuickCreatePrompt(Task{QuickCreatePrompt: "fix the login button color"})
 	mustContain := []string{
-		"multica squad list",
+		"\"$MULTICA_CLI_PATH\" squad list",
 		"Squads are first-class assignees",
 		"Treat bare @-routing as an assignee directive",
 		"让 @独立团 review 这个 PR",
