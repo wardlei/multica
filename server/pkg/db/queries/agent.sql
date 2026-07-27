@@ -238,13 +238,18 @@ ORDER BY created_at DESC;
 -- issues with no linked PR. Issue-linked tasks never hit quick-create context
 -- parsing (parseQuickCreateContext short-circuits on IssueID.Valid), so this
 -- key rides harmlessly alongside.
+WITH worktree_guard AS (
+    SELECT cw.id FROM code_worktree cw
+    WHERE cw.id = NULLIF(COALESCE(sqlc.narg(worktree_context)::jsonb ->> 'worktree_id', ''), '')::uuid
+    FOR KEY SHARE OF cw
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
     coalesced_comment_ids, trigger_summary, force_fresh_session, is_leader_task, handoff_note,
     squad_id, context, originator_user_id, accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
-    originator_source, delegated_from_task_id, rule_version_id, rerun_of_task_id, trigger_evidence_kind, trigger_evidence_ref_id
+    originator_source, delegated_from_task_id, rule_version_id, rerun_of_task_id, trigger_evidence_kind, trigger_evidence_ref_id, worktree_context
 )
-VALUES (
+SELECT
     $1, $2, $3, 'queued', $4, sqlc.narg(trigger_comment_id),
     COALESCE(sqlc.narg(coalesced_comment_ids)::uuid[], '{}'),
     sqlc.narg(trigger_summary),
@@ -266,8 +271,9 @@ VALUES (
     sqlc.narg(rule_version_id),
     sqlc.narg(rerun_of_task_id),
     sqlc.narg(trigger_evidence_kind),
-    sqlc.narg(trigger_evidence_ref_id)
-)
+    sqlc.narg(trigger_evidence_ref_id), COALESCE(sqlc.narg(worktree_context)::jsonb, '{}'::jsonb)
+WHERE COALESCE(sqlc.narg(worktree_context)::jsonb ->> 'worktree_id', '') = ''
+   OR EXISTS (SELECT 1 FROM worktree_guard)
 RETURNING *;
 
 -- name: CreateQuickCreateTask :one
@@ -302,13 +308,19 @@ RETURNING *;
 -- same trigger comment as the primary task, so the fallback assignee's run
 -- carries a non-NULL source and evidence rather than bypassing attribution
 -- (MUL-4302 §2).
+WITH worktree_guard AS (
+    SELECT cw.id FROM code_worktree cw
+    WHERE cw.id = NULLIF(COALESCE(sqlc.narg(worktree_context)::jsonb ->> 'worktree_id', ''), '')::uuid
+    FOR KEY SHARE OF cw
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
     trigger_summary, is_leader_task, squad_id, escalation_for_task_id, fire_at,
     originator_user_id, accountable_user_id, originator_source,
-    delegated_from_task_id, trigger_evidence_kind, trigger_evidence_ref_id
+    delegated_from_task_id, trigger_evidence_kind, trigger_evidence_ref_id,
+    worktree_context
 )
-VALUES (
+SELECT
     @agent_id, @runtime_id, @issue_id, 'deferred', @priority,
     sqlc.narg(trigger_comment_id),
     sqlc.narg(trigger_summary),
@@ -321,8 +333,10 @@ VALUES (
     sqlc.narg(originator_source),
     sqlc.narg(delegated_from_task_id),
     sqlc.narg(trigger_evidence_kind),
-    sqlc.narg(trigger_evidence_ref_id)
-)
+    sqlc.narg(trigger_evidence_ref_id),
+    COALESCE(sqlc.narg(worktree_context)::jsonb, '{}'::jsonb)
+WHERE COALESCE(sqlc.narg(worktree_context)::jsonb ->> 'worktree_id', '') = ''
+   OR EXISTS (SELECT 1 FROM worktree_guard)
 RETURNING *;
 
 -- name: LinkTaskToIssue :exec
@@ -388,6 +402,14 @@ WHERE id = $1 AND issue_id IS NULL;
 -- attempt=3, max_attempts=3 rather than leaking attempt=3, max_attempts=2 to the
 -- task API (MUL-4910). The Go retryAttemptCeiling already refuses to raise a
 -- disabled (max_attempts<=1) task, so this only ever widens, never revives.
+WITH parent AS (
+    SELECT atq.* FROM agent_task_queue AS atq WHERE atq.id = $1
+), worktree_guard AS (
+    SELECT cw.id
+    FROM code_worktree cw
+    JOIN parent p ON cw.id = NULLIF(COALESCE(p.worktree_context ->> 'worktree_id', ''), '')::uuid
+    FOR KEY SHARE OF cw
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, trigger_comment_id, coalesced_comment_ids, trigger_summary, context,
@@ -396,7 +418,7 @@ INSERT INTO agent_task_queue (
     squad_id, originator_user_id, accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
     originator_source, delegated_from_task_id, rule_version_id,
     trigger_evidence_kind, trigger_evidence_ref_id, retry_of_task_id,
-    chat_input_task_id, fire_at
+    chat_input_task_id, fire_at, worktree_context
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
@@ -415,9 +437,10 @@ SELECT
     sqlc.narg(runtime_connected_apps),
     p.originator_source, p.delegated_from_task_id, p.rule_version_id,
     p.trigger_evidence_kind, p.trigger_evidence_ref_id, p.id,
-    p.chat_input_task_id, sqlc.narg(fire_at)
-FROM agent_task_queue p
-WHERE p.id = $1
+    p.chat_input_task_id, sqlc.narg(fire_at), p.worktree_context
+FROM parent p
+WHERE COALESCE(p.worktree_context ->> 'worktree_id', '') = ''
+   OR EXISTS (SELECT 1 FROM worktree_guard)
 RETURNING *;
 
 -- name: CancelAgentTasksByIssue :many

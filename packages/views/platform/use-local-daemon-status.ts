@@ -28,6 +28,13 @@ interface DaemonAPILike {
   onStatusChange?: (cb: (s: DaemonStatusLike) => void) => () => void;
 }
 
+interface CodeWorktreeDaemonAPI {
+  inspectCodeWorktree?: (
+    inspectionId: string,
+    localPath: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+}
+
 function readDaemonAPI(): DaemonAPILike | undefined {
   if (typeof window === "undefined") return undefined;
   return (window as unknown as { daemonAPI?: DaemonAPILike }).daemonAPI;
@@ -81,4 +88,14 @@ export function useLocalDaemonStatus(): LocalDaemonStatus {
   }, []);
 
   return status;
+}
+
+export async function inspectLocalCodeWorktree(
+  inspectionId: string,
+  localPath: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (typeof window === "undefined") return { ok: false, error: "Desktop app is required" };
+  const api = (window as unknown as { daemonAPI?: CodeWorktreeDaemonAPI }).daemonAPI;
+  if (!api?.inspectCodeWorktree) return { ok: false, error: "Desktop app is required" };
+  return api.inspectCodeWorktree(inspectionId, localPath);
 }

@@ -1,0 +1,48 @@
+{
+  "objects": [
+    {
+      "object_id": "worktree-inspection-proof",
+      "critical": true,
+      "description": "short-lived daemon-authenticated inspection used to create or refresh a code worktree"
+    },
+    {
+      "object_id": "project-default-code-worktree",
+      "critical": true,
+      "description": "mutable Project pointer selecting its default code execution context"
+    },
+    {
+      "object_id": "agent-task-worktree-snapshot",
+      "critical": true,
+      "description": "immutable expected Git snapshot stored with an executable task"
+    }
+  ],
+  "entries": [
+    {"object_id":"worktree-inspection-proof","dimension":"Fact source","status":"covered","critical":true,"evidence":"Design: local daemon owns Git facts; server stores only daemon-authenticated result."},
+    {"object_id":"worktree-inspection-proof","dimension":"Producers and consumers","status":"covered","critical":true,"evidence":"Design registration flow names desktop/CLI request, daemon completion, API persistence, and UI confirmation."},
+    {"object_id":"worktree-inspection-proof","dimension":"State and terminal behavior","status":"covered","critical":true,"evidence":"Design defines pending, completed, consumed, and expired lifecycle."},
+    {"object_id":"worktree-inspection-proof","dimension":"Failure and retry","status":"covered","critical":true,"evidence":"Expiry and daemon reachability leave existing binding visible; user starts a new inspection."},
+    {"object_id":"worktree-inspection-proof","dimension":"Concurrency and idempotency","status":"covered","critical":true,"evidence":"One-time consume and optimistic refresh updated_at check are specified."},
+    {"object_id":"worktree-inspection-proof","dimension":"Activation and rollback","status":"not_applicable","critical":false,"evidence":"Inspection is an ephemeral proof and does not publish a readable version."},
+    {"object_id":"worktree-inspection-proof","dimension":"Permission and input","status":"covered","critical":true,"evidence":"Completion is daemon-authenticated and bound to requesting user, workspace, daemon, and expiry."},
+    {"object_id":"worktree-inspection-proof","dimension":"Observability","status":"covered","critical":true,"evidence":"Inspection and result IDs, typed errors, and inspected state are exposed in the contract."},
+    {"object_id":"worktree-inspection-proof","dimension":"Cross-artifact agreement","status":"covered","critical":true,"evidence":"Re-reviewed against current daemon local-path safety boundary and handler daemon credential boundary."},
+    {"object_id":"project-default-code-worktree","dimension":"Fact source","status":"covered","critical":true,"evidence":"Project owns nullable default pointer; code_worktree owns the verified checkout record."},
+    {"object_id":"project-default-code-worktree","dimension":"Producers and consumers","status":"covered","critical":true,"evidence":"Project bind/unbind API writes pointer; enqueue resolves it; desktop displays it; web is read-only."},
+    {"object_id":"project-default-code-worktree","dimension":"State and terminal behavior","status":"covered","critical":true,"evidence":"Nullable pointer, bind/unbind, and deletion guard are specified."},
+    {"object_id":"project-default-code-worktree","dimension":"Failure and retry","status":"covered","critical":true,"evidence":"Incompatible local_directory and dirty state reject assignment with typed errors."},
+    {"object_id":"project-default-code-worktree","dimension":"Concurrency and idempotency","status":"covered","critical":true,"evidence":"Bind locks worktree and delete checks pointers transactionally."},
+    {"object_id":"project-default-code-worktree","dimension":"Activation and rollback","status":"covered","critical":true,"evidence":"Bind affects only future tasks; unbind is explicit and leaves old task snapshots readable."},
+    {"object_id":"project-default-code-worktree","dimension":"Permission and input","status":"covered","critical":true,"evidence":"Workspace ownership and same-daemon runtime validation are required."},
+    {"object_id":"project-default-code-worktree","dimension":"Observability","status":"covered","critical":true,"evidence":"Project UI shows binding facts; project binding emits project:updated and initiating worktree mutations invalidate the local query."},
+    {"object_id":"project-default-code-worktree","dimension":"Cross-artifact agreement","status":"covered","critical":true,"evidence":"Design preserves the existing project_resource model as separate compatibility surface."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Fact source","status":"covered","critical":true,"evidence":"Revision names agent_task_queue.worktree_context as the immutable stored snapshot."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Producers and consumers","status":"covered","critical":true,"evidence":"Enqueue writes snapshot; claim returns it; daemon preflight consumes it; retry/rerun rules are explicit."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"State and terminal behavior","status":"covered","critical":true,"evidence":"Non-worktree tasks use {}; active snapshots protect deletion; terminal task history remains auditable."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Failure and retry","status":"covered","critical":true,"evidence":"Preflight drift fails before launch; retry inherits snapshot; rerun resolves a new binding."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Concurrency and idempotency","status":"covered","critical":true,"evidence":"Task creation and retry take KEY SHARE on the referenced worktree; deletion takes the conflicting worktree lock, then checks non-terminal snapshots."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Activation and rollback","status":"covered","critical":true,"evidence":"A Project change affects future tasks only; queued snapshots are not rewritten."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Permission and input","status":"covered","critical":true,"evidence":"Server rejects runtime/daemon mismatch before inserting task; daemon rechecks local Git before execution."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Observability","status":"covered","critical":true,"evidence":"Task logs and payload include worktree ID, path, expected and observed Git state."},
+    {"object_id":"agent-task-worktree-snapshot","dimension":"Cross-artifact agreement","status":"covered","critical":true,"evidence":"Revision aligns server claim-time project loading with an explicit stored task context requirement."}
+  ]
+}

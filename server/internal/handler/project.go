@@ -42,24 +42,26 @@ type ProjectResponse struct {
 	// /api/projects/{id}/resources. Resources themselves stay out of this
 	// payload to keep parent metadata and child collections separate; clients
 	// that need the list call ListProjectResources directly.
-	ResourceCount int64 `json:"resource_count"`
+	ResourceCount         int64   `json:"resource_count"`
+	DefaultCodeWorktreeID *string `json:"default_code_worktree_id"`
 }
 
 func projectToResponse(p db.Project) ProjectResponse {
 	return ProjectResponse{
-		ID:          uuidToString(p.ID),
-		WorkspaceID: uuidToString(p.WorkspaceID),
-		Title:       p.Title,
-		Description: textToPtr(p.Description),
-		Icon:        textToPtr(p.Icon),
-		Status:      p.Status,
-		Priority:    p.Priority,
-		LeadType:    textToPtr(p.LeadType),
-		LeadID:      uuidToPtr(p.LeadID),
-		StartDate:   dateToPtr(p.StartDate),
-		DueDate:     dateToPtr(p.DueDate),
-		CreatedAt:   timestampToString(p.CreatedAt),
-		UpdatedAt:   timestampToString(p.UpdatedAt),
+		ID:                    uuidToString(p.ID),
+		WorkspaceID:           uuidToString(p.WorkspaceID),
+		Title:                 p.Title,
+		Description:           textToPtr(p.Description),
+		Icon:                  textToPtr(p.Icon),
+		Status:                p.Status,
+		Priority:              p.Priority,
+		LeadType:              textToPtr(p.LeadType),
+		LeadID:                uuidToPtr(p.LeadID),
+		StartDate:             dateToPtr(p.StartDate),
+		DueDate:               dateToPtr(p.DueDate),
+		CreatedAt:             timestampToString(p.CreatedAt),
+		UpdatedAt:             timestampToString(p.UpdatedAt),
+		DefaultCodeWorktreeID: uuidToPtr(p.DefaultCodeWorktreeID),
 	}
 }
 

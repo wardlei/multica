@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_code_worktree_workspace_daemon_path;

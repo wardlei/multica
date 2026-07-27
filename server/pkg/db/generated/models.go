@@ -150,6 +150,7 @@ type AgentTaskQueue struct {
 	TriggerEvidenceRefID pgtype.UUID `json:"trigger_evidence_ref_id"`
 	// The one human accountable for this run, for audit / visibility / cost only — NEVER consulted for authorization (that is originator_user_id). Invariant: when originator_user_id IS NOT NULL, this equals it; the two diverge only when originator_user_id IS NULL (autopilot rule_owner / degraded owner_fallback name an accountable human while authorization carries none). No FK, no cascade (MUL-4302 §1/§7). NULL means no accountable human was resolved: a pre-migration row, OR a NEW row whose audit source is not-yet-resolved / unattributed (e.g. run_only autopilot until rule_owner lands) — NOT pre-migration only.
 	AccountableUserID pgtype.UUID `json:"accountable_user_id"`
+	WorktreeContext   []byte      `json:"worktree_context"`
 }
 
 type AgentToLabel struct {
@@ -409,6 +410,42 @@ type ClientUsageDaily struct {
 	OfflineCount    pgtype.Int4        `json:"offline_count"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CodeWorktree struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	DaemonID      string             `json:"daemon_id"`
+	LocalPath     string             `json:"local_path"`
+	CanonicalPath string             `json:"canonical_path"`
+	RepositoryUrl string             `json:"repository_url"`
+	Branch        string             `json:"branch"`
+	HeadSha       string             `json:"head_sha"`
+	IsDirty       bool               `json:"is_dirty"`
+	InspectedAt   pgtype.Timestamptz `json:"inspected_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	CreatedBy     pgtype.UUID        `json:"created_by"`
+}
+
+type CodeWorktreeInspection struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	DaemonID          string             `json:"daemon_id"`
+	LocalPath         string             `json:"local_path"`
+	WorktreeID        pgtype.UUID        `json:"worktree_id"`
+	ExpectedUpdatedAt pgtype.Timestamptz `json:"expected_updated_at"`
+	Status            string             `json:"status"`
+	CanonicalPath     pgtype.Text        `json:"canonical_path"`
+	RepositoryUrl     pgtype.Text        `json:"repository_url"`
+	Branch            pgtype.Text        `json:"branch"`
+	HeadSha           pgtype.Text        `json:"head_sha"`
+	IsDirty           pgtype.Bool        `json:"is_dirty"`
+	Error             pgtype.Text        `json:"error"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
+	CreatedBy         pgtype.UUID        `json:"created_by"`
 }
 
 type Comment struct {
@@ -797,19 +834,20 @@ type PinnedItem struct {
 }
 
 type Project struct {
-	ID          pgtype.UUID        `json:"id"`
-	WorkspaceID pgtype.UUID        `json:"workspace_id"`
-	Title       string             `json:"title"`
-	Description pgtype.Text        `json:"description"`
-	Icon        pgtype.Text        `json:"icon"`
-	Status      string             `json:"status"`
-	LeadType    pgtype.Text        `json:"lead_type"`
-	LeadID      pgtype.UUID        `json:"lead_id"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	Priority    string             `json:"priority"`
-	StartDate   pgtype.Date        `json:"start_date"`
-	DueDate     pgtype.Date        `json:"due_date"`
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	Title                 string             `json:"title"`
+	Description           pgtype.Text        `json:"description"`
+	Icon                  pgtype.Text        `json:"icon"`
+	Status                string             `json:"status"`
+	LeadType              pgtype.Text        `json:"lead_type"`
+	LeadID                pgtype.UUID        `json:"lead_id"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	Priority              string             `json:"priority"`
+	StartDate             pgtype.Date        `json:"start_date"`
+	DueDate               pgtype.Date        `json:"due_date"`
+	DefaultCodeWorktreeID pgtype.UUID        `json:"default_code_worktree_id"`
 }
 
 type ProjectResource struct {

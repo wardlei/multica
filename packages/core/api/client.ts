@@ -98,6 +98,13 @@ import type {
   CreateProjectResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
+  CodeWorktree,
+  ListCodeWorktreesResponse,
+  CodeWorktreeInspection,
+  CreateCodeWorktreeInspectionRequest,
+  CreateCodeWorktreeRequest,
+  RefreshCodeWorktreeRequest,
+  SetProjectCodeWorktreeRequest,
   Label,
   IssueProperty,
   IssuePropertyValue,
@@ -282,6 +289,20 @@ import {
   EMPTY_LABEL,
   EMPTY_LIST_LABELS_RESPONSE,
   EMPTY_RESOURCE_LABELS_RESPONSE,
+  ProjectSchema,
+  ListProjectsResponseSchema,
+  EMPTY_LIST_PROJECTS_RESPONSE,
+  ProjectResourceSchema,
+  ListProjectResourcesResponseSchema,
+  EMPTY_LIST_PROJECT_RESOURCES_RESPONSE,
+  CodeWorktreeSchema,
+  ListCodeWorktreesResponseSchema,
+  EMPTY_LIST_CODE_WORKTREES_RESPONSE,
+  CodeWorktreeInspectionSchema,
+  EMPTY_CODE_WORKTREE_INSPECTION,
+  EMPTY_PROJECT,
+  EMPTY_PROJECT_RESOURCE,
+  EMPTY_CODE_WORKTREE,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -2304,25 +2325,33 @@ export class ApiClient {
   async listProjects(params?: { status?: string }): Promise<ListProjectsResponse> {
     const search = new URLSearchParams();
     if (params?.status) search.set("status", params.status);
-    return this.fetch(`/api/projects?${search}`);
+    const raw = await this.fetch<unknown>(`/api/projects?${search}`);
+    return parseWithFallback(raw, ListProjectsResponseSchema, EMPTY_LIST_PROJECTS_RESPONSE, {
+      endpoint: "GET /api/projects",
+    });
   }
 
   async getProject(id: string): Promise<Project> {
-    return this.fetch(`/api/projects/${id}`);
+    const raw = await this.fetch<unknown>(`/api/projects/${id}`);
+    return parseWithFallback(raw, ProjectSchema, EMPTY_PROJECT, {
+      endpoint: "GET /api/projects/{id}",
+    });
   }
 
   async createProject(data: CreateProjectRequest): Promise<Project> {
-    return this.fetch("/api/projects", {
+    const raw = await this.fetch<unknown>("/api/projects", {
       method: "POST",
       body: JSON.stringify(data),
     });
+    return parseWithFallback(raw, ProjectSchema, EMPTY_PROJECT, { endpoint: "POST /api/projects" });
   }
 
   async updateProject(id: string, data: UpdateProjectRequest): Promise<Project> {
-    return this.fetch(`/api/projects/${id}`, {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     });
+    return parseWithFallback(raw, ProjectSchema, EMPTY_PROJECT, { endpoint: "PUT /api/projects/{id}" });
   }
 
   async deleteProject(id: string): Promise<void> {
@@ -2333,17 +2362,19 @@ export class ApiClient {
   async listProjectResources(
     projectId: string,
   ): Promise<ListProjectResourcesResponse> {
-    return this.fetch(`/api/projects/${projectId}/resources`);
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources`);
+    return parseWithFallback(raw, ListProjectResourcesResponseSchema, EMPTY_LIST_PROJECT_RESOURCES_RESPONSE, { endpoint: "GET /api/projects/{id}/resources" });
   }
 
   async createProjectResource(
     projectId: string,
     data: CreateProjectResourceRequest,
   ): Promise<ProjectResource> {
-    return this.fetch(`/api/projects/${projectId}/resources`, {
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources`, {
       method: "POST",
       body: JSON.stringify(data),
     });
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, { endpoint: "POST /api/projects/{id}/resources" });
   }
 
   async updateProjectResource(
@@ -2351,10 +2382,45 @@ export class ApiClient {
     resourceId: string,
     data: UpdateProjectResourceRequest,
   ): Promise<ProjectResource> {
-    return this.fetch(`/api/projects/${projectId}/resources/${resourceId}`, {
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources/${resourceId}`, {
       method: "PUT",
       body: JSON.stringify(data),
     });
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, { endpoint: "PUT /api/projects/{id}/resources/{resourceId}" });
+  }
+
+  async listCodeWorktrees(): Promise<ListCodeWorktreesResponse> {
+    const raw = await this.fetch<unknown>("/api/code-worktrees");
+    return parseWithFallback(raw, ListCodeWorktreesResponseSchema, EMPTY_LIST_CODE_WORKTREES_RESPONSE, { endpoint: "GET /api/code-worktrees" });
+  }
+
+  async createCodeWorktreeInspection(data: CreateCodeWorktreeInspectionRequest): Promise<CodeWorktreeInspection> {
+    const raw = await this.fetch<unknown>("/api/code-worktrees/inspections", { method: "POST", body: JSON.stringify(data) });
+    return parseWithFallback(raw, CodeWorktreeInspectionSchema, EMPTY_CODE_WORKTREE_INSPECTION, { endpoint: "POST /api/code-worktrees/inspections" });
+  }
+
+  async getCodeWorktreeInspection(id: string): Promise<CodeWorktreeInspection> {
+    const raw = await this.fetch<unknown>(`/api/code-worktrees/inspections/${id}`);
+    return parseWithFallback(raw, CodeWorktreeInspectionSchema, EMPTY_CODE_WORKTREE_INSPECTION, { endpoint: "GET /api/code-worktrees/inspections/{id}" });
+  }
+
+  async createCodeWorktree(data: CreateCodeWorktreeRequest): Promise<CodeWorktree> {
+    const raw = await this.fetch<unknown>("/api/code-worktrees", { method: "POST", body: JSON.stringify(data) });
+    return parseWithFallback(raw, CodeWorktreeSchema, EMPTY_CODE_WORKTREE, { endpoint: "POST /api/code-worktrees" });
+  }
+
+  async refreshCodeWorktree(id: string, data: RefreshCodeWorktreeRequest): Promise<CodeWorktree> {
+    const raw = await this.fetch<unknown>(`/api/code-worktrees/${id}`, { method: "PUT", body: JSON.stringify(data) });
+    return parseWithFallback(raw, CodeWorktreeSchema, EMPTY_CODE_WORKTREE, { endpoint: "PUT /api/code-worktrees/{id}" });
+  }
+
+  async deleteCodeWorktree(id: string): Promise<void> {
+    await this.fetch(`/api/code-worktrees/${id}`, { method: "DELETE" });
+  }
+
+  async setProjectCodeWorktree(projectId: string, data: SetProjectCodeWorktreeRequest): Promise<Project> {
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/code-worktree`, { method: "PUT", body: JSON.stringify(data) });
+    return parseWithFallback(raw, ProjectSchema, EMPTY_PROJECT, { endpoint: "PUT /api/projects/{id}/code-worktree" });
   }
 
   async deleteProjectResource(

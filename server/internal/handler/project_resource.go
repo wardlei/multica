@@ -145,6 +145,24 @@ func validateLocalDirectoryRef(ref json.RawMessage) (json.RawMessage, error) {
 	return out, nil
 }
 
+func ensureNoCodeWorktreeConflict(ctx context.Context, q *db.Queries, project db.Project, resourceType string, ref json.RawMessage) error {
+	if resourceType != "local_directory" || !project.DefaultCodeWorktreeID.Valid {
+		return nil
+	}
+	var local localDirectoryRef
+	if err := json.Unmarshal(ref, &local); err != nil {
+		return err
+	}
+	worktree, err := q.GetCodeWorktreeInWorkspace(ctx, db.GetCodeWorktreeInWorkspaceParams{ID: project.DefaultCodeWorktreeID, WorkspaceID: project.WorkspaceID})
+	if err != nil {
+		return fmt.Errorf("project code worktree is no longer available")
+	}
+	if worktree.DaemonID == local.DaemonID {
+		return errors.New("remove the code worktree on this daemon before adding a legacy local_directory")
+	}
+	return nil
+}
+
 // isAbsoluteLocalPath checks the path looks absolute on either POSIX or
 // Windows daemons. The server can't know which OS the daemon runs on, so we
 // accept the union: a leading "/" (POSIX), a UNC prefix "\\", or a drive
@@ -278,11 +296,27 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if conflict, err := h.findLocalDirectoryConflict(r.Context(), project.ID, req.ResourceType, normalizedRef, pgtype.UUID{}); err != nil {
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "begin transaction failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	q := h.Queries.WithTx(tx)
+	project, err = q.LockProjectForCodeWorktree(r.Context(), db.LockProjectForCodeWorktreeParams{ID: project.ID, WorkspaceID: project.WorkspaceID})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if conflict, err := findLocalDirectoryConflict(r.Context(), q, project.ID, req.ResourceType, normalizedRef, pgtype.UUID{}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
 		return
 	} else if conflict {
 		writeError(w, http.StatusConflict, "this daemon already has a local_directory attached to the project; remove it before adding another")
+		return
+	}
+	if err := ensureNoCodeWorktreeConflict(r.Context(), q, project, req.ResourceType, normalizedRef); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
@@ -295,12 +329,12 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		position = *req.Position
 	} else {
 		// Append after existing resources.
-		count, _ := h.Queries.CountProjectResources(r.Context(), project.ID)
+		count, _ := q.CountProjectResources(r.Context(), project.ID)
 		position = int32(count)
 	}
 
 	creator, _ := h.parseUserUUIDOrZero(userID)
-	resource, err := h.Queries.CreateProjectResource(r.Context(), db.CreateProjectResourceParams{
+	resource, err := q.CreateProjectResource(r.Context(), db.CreateProjectResourceParams{
 		ProjectID:    project.ID,
 		WorkspaceID:  project.WorkspaceID,
 		ResourceType: req.ResourceType,
@@ -314,6 +348,10 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusConflict, "this resource is already attached to the project")
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "failed to create project resource")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create project resource")
 		return
 	}
@@ -349,7 +387,19 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	existing, err := h.Queries.GetProjectResourceInWorkspace(r.Context(), db.GetProjectResourceInWorkspaceParams{
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "begin transaction failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	q := h.Queries.WithTx(tx)
+	project, err = q.LockProjectForCodeWorktree(r.Context(), db.LockProjectForCodeWorktreeParams{ID: project.ID, WorkspaceID: project.WorkspaceID})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	existing, err := q.GetProjectResourceInWorkspace(r.Context(), db.GetProjectResourceInWorkspaceParams{
 		ID: resourceUUID, WorkspaceID: project.WorkspaceID,
 	})
 	if err != nil {
@@ -380,11 +430,15 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 		nextRef = normalized
 	}
 
-	if conflict, err := h.findLocalDirectoryConflict(r.Context(), project.ID, existing.ResourceType, nextRef, existing.ID); err != nil {
+	if conflict, err := findLocalDirectoryConflict(r.Context(), q, project.ID, existing.ResourceType, nextRef, existing.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
 		return
 	} else if conflict {
 		writeError(w, http.StatusConflict, "another local_directory on this daemon is already attached to the project")
+		return
+	}
+	if err := ensureNoCodeWorktreeConflict(r.Context(), q, project, existing.ResourceType, nextRef); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
@@ -414,7 +468,7 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	updated, err := h.Queries.UpdateProjectResource(r.Context(), db.UpdateProjectResourceParams{
+	updated, err := q.UpdateProjectResource(r.Context(), db.UpdateProjectResourceParams{
 		ID:          existing.ID,
 		ResourceRef: nextRef,
 		Label:       nextLabel,
@@ -425,6 +479,10 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusConflict, "this resource is already attached to the project")
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "failed to update project resource")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update project resource")
 		return
 	}
@@ -453,7 +511,7 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 // through. We do the daemon-scoped check here in application code instead.
 //
 // `excludeID` lets the update path ignore the row being edited.
-func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage, excludeID pgtype.UUID) (bool, error) {
+func findLocalDirectoryConflict(ctx context.Context, q *db.Queries, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage, excludeID pgtype.UUID) (bool, error) {
 	if resourceType != "local_directory" {
 		return false, nil
 	}
@@ -461,7 +519,7 @@ func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgty
 	if err := json.Unmarshal(normalizedRef, &incoming); err != nil {
 		return false, err
 	}
-	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	rows, err := q.ListProjectResources(ctx, projectID)
 	if err != nil {
 		return false, err
 	}

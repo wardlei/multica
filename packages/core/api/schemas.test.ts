@@ -31,6 +31,8 @@ import {
   SquadSchema,
   TimelineEntriesSchema,
   UserSchema,
+  ListCodeWorktreesResponseSchema,
+  EMPTY_LIST_CODE_WORKTREES_RESPONSE,
 } from "./schemas";
 import { parseWithFallback } from "./schema";
 
@@ -57,6 +59,34 @@ const baseIssue = {
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
 };
+
+describe("ListCodeWorktreesResponseSchema", () => {
+  const endpoint = { endpoint: "GET /api/code-worktrees" };
+
+  it("keeps a valid inspected worktree", () => {
+    const parsed = ListCodeWorktreesResponseSchema.parse({
+      worktrees: [{
+        id: "worktree-1", workspace_id: "workspace-1", daemon_id: "daemon-1",
+        local_path: "/src/repo", canonical_path: "/src/repo",
+        repository_url: "github.com/multica-ai/multica", branch: "main",
+        head_sha: "0123456789012345678901234567890123456789", is_dirty: false,
+        inspected_at: "2026-07-28T00:00:00Z", updated_at: "2026-07-28T00:00:00Z",
+      }],
+      total: 1,
+    });
+    expect(parsed.worktrees[0]?.branch).toBe("main");
+  });
+
+  it("falls back when an installed client receives a malformed worktree list", () => {
+    const parsed = parseWithFallback(
+      { worktrees: [{ id: "worktree-1", is_dirty: "no" }], total: 1 },
+      ListCodeWorktreesResponseSchema,
+      EMPTY_LIST_CODE_WORKTREES_RESPONSE,
+      endpoint,
+    );
+    expect(parsed).toEqual(EMPTY_LIST_CODE_WORKTREES_RESPONSE);
+  });
+});
 
 describe("IssueSchema (via ListIssuesResponseSchema)", () => {
   it("accepts a primitive metadata KV map", () => {

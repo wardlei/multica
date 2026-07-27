@@ -19,3 +19,11 @@ export {
   useUpdateProjectResource,
   useDeleteProjectResource,
 } from "./resource-queries";
+export {
+  codeWorktreeKeys,
+  codeWorktreesOptions,
+  useCreateCodeWorktree,
+  useRefreshCodeWorktree,
+  useDeleteCodeWorktree,
+  useSetProjectCodeWorktree,
+} from "./code-worktree-queries";

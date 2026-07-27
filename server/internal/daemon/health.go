@@ -63,6 +63,11 @@ type repoCheckoutRequest struct {
 	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
+type codeWorktreeInspectRequest struct {
+	InspectionID string `json:"inspection_id"`
+	LocalPath    string `json:"local_path"`
+}
+
 // healthHandler returns the /health HTTP handler. Extracted from serveHealth
 // so tests can exercise it without spinning up a listener.
 func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
@@ -141,6 +146,7 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 	mux.HandleFunc("/health", d.healthHandler(startedAt))
 	mux.HandleFunc("/shutdown", d.shutdownHandler())
 	mux.HandleFunc("/repo/checkout", d.repoCheckoutHandler())
+	mux.HandleFunc("/code-worktree/inspect", d.codeWorktreeInspectHandler())
 
 	srv := &http.Server{Handler: mux}
 
@@ -152,6 +158,31 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 	d.logger.Info("health server listening", "addr", ln.Addr().String())
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		d.logger.Warn("health server error", "error", err)
+	}
+}
+
+func (d *Daemon) codeWorktreeInspectHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req codeWorktreeInspectRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.InspectionID) == "" || strings.TrimSpace(req.LocalPath) == "" {
+			http.Error(w, "inspection_id and local_path are required", http.StatusBadRequest)
+			return
+		}
+		result, inspectErr := inspectCodeWorktree(req.LocalPath)
+		if err := d.client.CompleteCodeWorktreeInspection(r.Context(), strings.TrimSpace(req.InspectionID), result, inspectErr); err != nil {
+			http.Error(w, "complete inspection: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if inspectErr != nil {
+			http.Error(w, inspectErr.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
 	}
 }
 
