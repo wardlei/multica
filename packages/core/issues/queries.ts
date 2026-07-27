@@ -456,9 +456,11 @@ export function issueTableRowPageOptions(
     queryFn: () => api.listIssueTableRows(request),
     placeholderData: keepPreviousData,
     retry: false,
-    // Dynamic useQueries observers can detach/reinstall as sibling branches
-    // enter the viewport. An errored page stays errored until explicit Retry.
-    refetchOnMount: false,
+    // A branch can be inactive when an issue is created. Its query is then
+    // invalidated while unobserved; when the user returns to the board it must
+    // refetch rather than pair a fresh facet count with stale cards. Preserve
+    // explicit Retry for genuine errors, however.
+    refetchOnMount: (query) => query.state.status !== "error",
   });
 }
 

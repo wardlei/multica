@@ -7,10 +7,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { setApiInstance } from "@multica/core/api";
 import type { ApiClient } from "@multica/core/api/client";
+import { issueKeys, issueTableRowPageOptions } from "@multica/core/issues/queries";
 import type {
   Issue,
   IssueStatus,
   IssueTableQuerySpec,
+  IssueTableRowsResponse,
   IssueTableRowsRequest,
 } from "@multica/core/types";
 import { useIssueStatusBranches } from "./use-issue-status-branches";
@@ -39,6 +41,18 @@ function makeIssue(id: string): Issue {
     properties: {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+  };
+}
+
+function rowsResponse(issues: Issue[]): IssueTableRowsResponse {
+  return {
+    query_fingerprint: "test",
+    group_key: "status:todo",
+    parent_id: null,
+    total: issues.length,
+    rows: issues.map((issue) => ({ issue, direct_child_count: 0 })),
+    branch_total: issues.length,
+    next_cursor: null,
   };
 }
 
@@ -81,7 +95,10 @@ describe("useIssueStatusBranches", () => {
     );
     setApiInstance({ listIssueTableRows } as unknown as ApiClient);
     const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
+      // Production keeps a settled branch fresh until an explicit realtime
+      // invalidation. This lets the collapse/re-expand assertion verify that
+      // a still-current cursor chain remains intact.
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
     });
 
     const { result, rerender } = renderHook(
@@ -142,6 +159,58 @@ describe("useIssueStatusBranches", () => {
     rerender({ statuses: ["todo"] });
     await waitFor(() => expect(result.current.issues).toHaveLength(2));
     expect(listIssueTableRows).toHaveBeenCalledTimes(2);
+
+    queryClient.clear();
+  });
+
+  it("refreshes an invalidated inactive branch when the board mounts", async () => {
+    const first = makeIssue("issue-1");
+    const second = makeIssue("issue-2");
+    const third = makeIssue("issue-3");
+    const request: IssueTableRowsRequest = {
+      query,
+      group: { kind: "status" },
+      group_key: "status:todo",
+      hierarchy: { enabled: false },
+      parent_id: null,
+      page: { limit: 50, cursor: null },
+    };
+    const listIssueTableRows = vi.fn(async () => rowsResponse([first, second, third]));
+    setApiInstance({ listIssueTableRows } as unknown as ApiClient);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    const rowOptions = issueTableRowPageOptions("ws-1", request);
+    queryClient.setQueryData<IssueTableRowsResponse>(rowOptions.queryKey, rowsResponse([first, second]));
+    await queryClient.invalidateQueries({ queryKey: issueKeys.tableAll("ws-1") });
+
+    const { result } = renderHook(
+      () =>
+        useIssueStatusBranches({
+          wsId: "ws-1",
+          query,
+          statuses: ["todo"],
+          facets: {
+            query_fingerprint: "test",
+            total: 3,
+            facets: [{ kind: "status", values: [{ key: "todo", count: 3 }] }],
+          },
+          facetsPending: false,
+          facetsFetching: false,
+          enabled: true,
+        }),
+      { wrapper: wrapper(queryClient) },
+    );
+
+    await waitFor(() =>
+      expect(result.current.issues.map((issue) => issue.id)).toEqual([
+        "issue-1",
+        "issue-2",
+        "issue-3",
+      ]),
+    );
+    expect(result.current.pagination.todo.total).toBe(3);
+    expect(listIssueTableRows).toHaveBeenCalledWith(request);
 
     queryClient.clear();
   });
