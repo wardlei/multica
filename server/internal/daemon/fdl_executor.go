@@ -763,19 +763,7 @@ The object must include schema_version=1 and request_id=%q, plus the requested e
 	if err := json.Indent(prettyIssueInput, issueInputJSON, "", "  "); err != nil {
 		return "", fmt.Errorf("format frozen FDL Issue input: %w", err)
 	}
-	contractInstruction := ""
-	if binding.Role == "planner" {
-		contractInstruction = `
-For the compact delivery plan, meta.json must include a contract_index object with this exact shape:
-{"schema_version":1,"artifact_kind":"delivery_plan","acceptance_criteria":[{"key":"AC-...","statement":"...","supersedes":null}],"acceptance_refs":[],"invariants":[{"key":"INV-...","statement":"...","acceptance_keys":["AC-..."],"supersedes":null}]}
-Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-001 are invalid. Your Markdown delivery plan must explicitly cite every AC-/INV- key declared in contract_index, and must not introduce an uncatalogued acceptance criterion or invariant. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
-`
-	}
-	if binding.Role == "planner" {
-		contractInstruction += `
-If repository facts are required before planning and this is not a compact/low-risk Controller dispatch, do not return a delivery plan. Instead write a non-empty report explaining why and metadata with exploration_requests only: [{"request_id":"impact-analysis","lane":"impact_analysis","question":"bounded question","allowed_paths":["relative/path"],"expected_evidence":["files"]}]. The executor submits that token-bound request directly to the Controller; never create or mention another Agent yourself.
-`
-	}
+	contractInstruction := fdlPhaseContractInstructions(payload)
 	consistencyInstruction := `If you write metadata, set evidence_consistency=not_applicable unless the Controller instruction exposes Context Pack evidence.`
 	if fdlRequiresEvidenceConsistency(payload) {
 		consistencyInstruction = `You MUST write meta.json and set evidence_consistency=checked after comparing the exposed Context Pack evidence with your report. If you find a conflict, set evidence_consistency=conflict_found and provide the required blocker or review finding; never use not_applicable for this work item.`
@@ -801,7 +789,7 @@ Work only in your assigned task workspace and within the frozen change rules. Do
 
 Write the role report in Markdown to:
 %s
-Write JSON metadata to %s only when required above or when you need to report a non-default outcome. Planning is the only role that may set contract_index or context_pack; every other role must omit both. It may otherwise contain outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested), findings, or finding_resolutions. All other roles must omit those review-only fields; place ordinary observations in the Markdown report and use blockers only when the work is blocked. Do not include identifiers copied from FDL state; the local executor binds them.
+Write JSON metadata to %s only when required above or when you need to report a non-default outcome. Only an intake, design, or compact planning phase may set contract_index; no Agent may set context_pack because the executor creates that private evidence. It may otherwise contain outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested), findings, or finding_resolutions. All other roles must omit those review-only fields; place ordinary observations in the Markdown report and use blockers only when the work is blocked. Do not include identifiers copied from FDL state; the local executor binds them.
 
 %s
 %s
@@ -813,12 +801,47 @@ Write JSON metadata to %s only when required above or when you need to report a 
 	return instructions, nil
 }
 
+// fdlPhaseContractInstructions keeps native Agent Tasks on the Controller's
+// phase contract. A profile role alone is insufficient because "planner" is
+// used by both full-route design and compact-route planning.
+func fdlPhaseContractInstructions(payload fdlDispatchPayload) string {
+	switch payload.Attempt.Phase {
+	case "intake":
+		return `
+You MUST write a meta.json object whose contract_index field has this exact shape:
+{"contract_index":{"schema_version":1,"artifact_kind":"task_brief","acceptance_criteria":[{"key":"AC-CORE-001","statement":"...","supersedes":null}],"acceptance_refs":[],"invariants":[]}}
+The schema_version and artifact_kind fields belong inside contract_index, never at the top level of meta.json. Define acceptance criteria only. Use stable namespaced AC keys, cite every AC key in the Markdown task brief, and do not introduce uncatalogued acceptance criteria. Do not request Explorer work during intake. Do not put a context_pack in meta.json.
+`
+	case "design":
+		briefHash := payload.InputHashes["task_brief_hash"]
+		return fmt.Sprintf(`
+You MUST write a meta.json object whose contract_index field has this exact shape:
+{"contract_index":{"schema_version":1,"artifact_kind":"design","acceptance_criteria":[],"acceptance_refs":[{"artifact_hash":%q,"keys":["AC-CORE-001"]}],"invariants":[{"key":"INV-CORE-001","statement":"...","acceptance_keys":["AC-CORE-001"],"supersedes":null}]}}
+The schema_version and artifact_kind fields belong inside contract_index, never at the top level of meta.json. The accepted task brief artifact hash is %q. Reference that exact hash and only its accepted AC keys in acceptance_refs. Use stable namespaced INV keys; cite every referenced AC key and every declared INV key in the Markdown design, and do not introduce uncatalogued criteria or invariants. Do not put a context_pack in meta.json: the executor binds its private Controller hashes.
+
+If the supplied evidence is insufficient to produce this design, write a non-empty report explaining why and metadata with exploration_requests only: [{"request_id":"impact-analysis","lane":"impact_analysis","question":"bounded question","allowed_paths":["relative/path"],"expected_evidence":["files"]}]. The executor submits that token-bound request directly to the Controller; never create or mention another Agent yourself.
+`, briefHash, briefHash)
+	case "planning":
+		return `
+You MUST write a meta.json object whose contract_index field has this exact shape:
+{"contract_index":{"schema_version":1,"artifact_kind":"delivery_plan","acceptance_criteria":[{"key":"AC-CORE-001","statement":"...","supersedes":null}],"acceptance_refs":[],"invariants":[{"key":"INV-CORE-001","statement":"...","acceptance_keys":["AC-CORE-001"],"supersedes":null}]}}
+The schema_version and artifact_kind fields belong inside contract_index, never at the top level of meta.json. Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-001 are invalid. Cite every AC-/INV- key declared in contract_index in the Markdown delivery plan, and do not introduce an uncatalogued acceptance criterion or invariant. Do not request Explorer work on this compact planning dispatch. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
+`
+	default:
+		return ""
+	}
+}
+
 func fdlRequiresEvidenceConsistency(payload fdlDispatchPayload) bool {
 	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
 		return true
 	}
 	_, ok := payload.InputHashes["context_pack_hash"]
 	return ok
+}
+
+func fdlBuildsContextPack(phase, outcome string) bool {
+	return outcome == "completed" && (phase == "design" || phase == "planning")
 }
 
 func fdlExtractsWorkspaceChanges(payload fdlDispatchPayload) bool {
@@ -1794,48 +1817,13 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 	if err != nil {
 		return nil, err
 	}
-	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
+	if payload.Attempt.Phase == "design" {
 		if requests, ok := meta["exploration_requests"]; ok {
 			requestList, ok := requests.([]any)
 			if !ok || len(requestList) == 0 {
 				return nil, fmt.Errorf("FDL exploration requests are invalid")
 			}
 			return fdlPlanningExplorationEvent(binding, requestList), nil
-		}
-	}
-	args := []string{"complete-work-item", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--work-item-id", binding.WorkItemID, "--report", reportPath}
-	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
-		contract, ok := meta["contract_index"].(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("FDL %s role metadata requires a contract_index object", payload.Attempt.Phase)
-		}
-		pack, err := d.fdlContextPack(runID, binding, payload, string(report), contract)
-		if err != nil {
-			return nil, err
-		}
-		path := filepath.Join(itemDir, "submission-context_pack.json")
-		if err := writeFDLExecutorJSON(path, pack); err != nil {
-			return nil, err
-		}
-		args = append(args, "--context-pack", path)
-		// This artifact binds private Controller evidence. Never accept an
-		// Agent-authored substitute for it.
-		delete(meta, "context_pack")
-	} else {
-		// Context Pack and formal contracts are Controller-owned planning
-		// evidence. Ignore incidental Agent metadata outside planning so it
-		// cannot invalidate an otherwise valid implementation or review result.
-		delete(meta, "context_pack")
-		delete(meta, "contract_index")
-		delete(meta, "exploration_requests")
-	}
-	for _, field := range []string{"contract_index", "context_pack", "findings", "finding_resolutions", "blockers", "failure"} {
-		if value, ok := meta[field]; ok {
-			path := filepath.Join(itemDir, "submission-"+field+".json")
-			if err := writeFDLExecutorJSON(path, value); err != nil {
-				return nil, err
-			}
-			args = append(args, "--"+strings.ReplaceAll(field, "_", "-"), path)
 		}
 	}
 	outcome := "completed"
@@ -1857,6 +1845,45 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 	// normalize that wording at the executor boundary before binding the result.
 	if payload.Attempt.Phase == "review" && decision == "changes_requested" && outcome == "completed" {
 		outcome = "blocked"
+	}
+
+	args := []string{"complete-work-item", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--work-item-id", binding.WorkItemID, "--report", reportPath}
+	isCheckpointPhase := payload.Attempt.Phase == "intake" || payload.Attempt.Phase == "design" || payload.Attempt.Phase == "planning"
+	if isCheckpointPhase && outcome != "failed" {
+		contract, ok := meta["contract_index"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("FDL %s role metadata requires a contract_index object", payload.Attempt.Phase)
+		}
+		if fdlBuildsContextPack(payload.Attempt.Phase, outcome) {
+			pack, err := d.fdlContextPack(runID, binding, payload, string(report), contract)
+			if err != nil {
+				return nil, err
+			}
+			path := filepath.Join(itemDir, "submission-context_pack.json")
+			if err := writeFDLExecutorJSON(path, pack); err != nil {
+				return nil, err
+			}
+			args = append(args, "--context-pack", path)
+		}
+		// This artifact binds private Controller evidence. Never accept an
+		// Agent-authored substitute for it.
+		delete(meta, "context_pack")
+	} else {
+		// Context Pack and formal contracts are Controller-owned planning
+		// evidence. Ignore incidental Agent metadata outside planning so it
+		// cannot invalidate an otherwise valid implementation or review result.
+		delete(meta, "context_pack")
+		delete(meta, "contract_index")
+		delete(meta, "exploration_requests")
+	}
+	for _, field := range []string{"contract_index", "context_pack", "findings", "finding_resolutions", "blockers", "failure"} {
+		if value, ok := meta[field]; ok {
+			path := filepath.Join(itemDir, "submission-"+field+".json")
+			if err := writeFDLExecutorJSON(path, value); err != nil {
+				return nil, err
+			}
+			args = append(args, "--"+strings.ReplaceAll(field, "_", "-"), path)
+		}
 	}
 	args = append(args, "--outcome", outcome)
 	if decision != "" {

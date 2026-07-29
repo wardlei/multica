@@ -106,12 +106,20 @@ func TestFDLPlanningExplorationEventPreservesPrivateBinding(t *testing.T) {
 }
 
 func TestReadFDLRoleMetaRejectsUnknownFields(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meta.json")
-	if err := writeFDLExecutorJSON(path, map[string]any{"outcome": "completed", "token": "must-not-pass"}); err != nil {
-		t.Fatalf("write metadata: %v", err)
-	}
-	if _, err := readFDLRoleMeta(path); err == nil {
-		t.Fatal("metadata with an unknown field was accepted")
+	for name, meta := range map[string]map[string]any{
+		"private token":       {"outcome": "completed", "token": "must-not-pass"},
+		"contract header":     {"schema_version": 1, "artifact_kind": "task_brief"},
+		"contract field typo": {"contract": map[string]any{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "meta.json")
+			if err := writeFDLExecutorJSON(path, meta); err != nil {
+				t.Fatalf("write metadata: %v", err)
+			}
+			if _, err := readFDLRoleMeta(path); err == nil {
+				t.Fatal("metadata with an unknown field was accepted")
+			}
+		})
 	}
 }
 
@@ -157,11 +165,60 @@ func TestFDLAgentInstructionsReserveContextPackForPlanning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(instructions, "Planning is the only role that may set contract_index or context_pack") {
+	if !strings.Contains(instructions, "Only an intake, design, or compact planning phase may set contract_index") {
 		t.Fatalf("review instructions did not reserve planning evidence: %s", instructions)
 	}
 	if !strings.Contains(instructions, "Do not execute any Gate command") || !strings.Contains(instructions, "Every finding must have exactly") {
 		t.Fatalf("review instructions did not provide the strict result contract: %s", instructions)
+	}
+}
+
+func TestFDLAgentInstructionsUseControllerPhaseContract(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"title":"Delivery","description":"Frozen requirement.","priority":"normal"}`)); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		phase       string
+		contains    []string
+		notContains []string
+	}{
+		{
+			name: "intake task brief", phase: "intake",
+			contains:    []string{`"contract_index":{"schema_version":1,"artifact_kind":"task_brief"`, "never at the top level of meta.json", "acceptance criteria only", "Do not request Explorer work during intake"},
+			notContains: []string{`"artifact_kind":"delivery_plan"`, "exploration_requests only"},
+		},
+		{
+			name: "design contract", phase: "design",
+			contains:    []string{`"contract_index":{"schema_version":1,"artifact_kind":"design"`, "sha256:task-brief", "exploration_requests only"},
+			notContains: []string{`"artifact_kind":"delivery_plan"`},
+		},
+		{
+			name: "compact plan", phase: "planning",
+			contains:    []string{`"contract_index":{"schema_version":1,"artifact_kind":"delivery_plan"`, "Do not request Explorer work on this compact planning dispatch"},
+			notContains: []string{`"artifact_kind":"task_brief"`, "exploration_requests only"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := fdlDispatchPayload{Instructions: json.RawMessage(`{}`), InputHashes: map[string]string{"task_brief_hash": "sha256:task-brief"}}
+			payload.Attempt.Phase = tt.phase
+			instructions, err := d.fdlAgentInstructions("run", fdlWorkItemBinding{WorkItemID: tt.phase, Role: "planner"}, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, value := range tt.contains {
+				if !strings.Contains(instructions, value) {
+					t.Fatalf("instructions missing %q: %s", value, instructions)
+				}
+			}
+			for _, value := range tt.notContains {
+				if strings.Contains(instructions, value) {
+					t.Fatalf("instructions unexpectedly contain %q: %s", value, instructions)
+				}
+			}
+		})
 	}
 }
 
@@ -232,6 +289,25 @@ func TestFDLRequiresEvidenceConsistency(t *testing.T) {
 				t.Fatalf("fdlRequiresEvidenceConsistency() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFDLBuildsContextPackOnlyForCompletedDesignOrCompactPlanning(t *testing.T) {
+	tests := []struct {
+		phase   string
+		outcome string
+		want    bool
+	}{
+		{phase: "intake", outcome: "completed", want: false},
+		{phase: "design", outcome: "completed", want: true},
+		{phase: "planning", outcome: "completed", want: true},
+		{phase: "design", outcome: "blocked", want: false},
+		{phase: "planning", outcome: "failed", want: false},
+	}
+	for _, tt := range tests {
+		if got := fdlBuildsContextPack(tt.phase, tt.outcome); got != tt.want {
+			t.Errorf("fdlBuildsContextPack(%q, %q) = %v, want %v", tt.phase, tt.outcome, got, tt.want)
+		}
 	}
 }
 
