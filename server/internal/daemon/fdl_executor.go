@@ -771,6 +771,11 @@ For the compact delivery plan, meta.json must include a contract_index object wi
 Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-001 are invalid. Your Markdown delivery plan must explicitly cite every AC-/INV- key declared in contract_index, and must not introduce an uncatalogued acceptance criterion or invariant. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
 `
 	}
+	if binding.Role == "planner" {
+		contractInstruction += `
+If repository facts are required before planning and this is not a compact/low-risk Controller dispatch, do not return a delivery plan. Instead write a non-empty report explaining why and metadata with exploration_requests only: [{"request_id":"impact-analysis","lane":"impact_analysis","question":"bounded question","allowed_paths":["relative/path"],"expected_evidence":["files"]}]. The executor submits that token-bound request directly to the Controller; never create or mention another Agent yourself.
+`
+	}
 	consistencyInstruction := `If you write metadata, set evidence_consistency=not_applicable unless the Controller instruction exposes Context Pack evidence.`
 	if fdlRequiresEvidenceConsistency(payload) {
 		consistencyInstruction = `You MUST write meta.json and set evidence_consistency=checked after comparing the exposed Context Pack evidence with your report. If you find a conflict, set evidence_consistency=conflict_found and provide the required blocker or review finding; never use not_applicable for this work item.`
@@ -1789,6 +1794,15 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 	if err != nil {
 		return nil, err
 	}
+	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
+		if requests, ok := meta["exploration_requests"]; ok {
+			requestList, ok := requests.([]any)
+			if !ok || len(requestList) == 0 {
+				return nil, fmt.Errorf("FDL exploration requests are invalid")
+			}
+			return fdlPlanningExplorationEvent(binding, requestList), nil
+		}
+	}
 	args := []string{"complete-work-item", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--work-item-id", binding.WorkItemID, "--report", reportPath}
 	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
 		contract, ok := meta["contract_index"].(map[string]any)
@@ -1813,6 +1827,7 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 		// cannot invalidate an otherwise valid implementation or review result.
 		delete(meta, "context_pack")
 		delete(meta, "contract_index")
+		delete(meta, "exploration_requests")
 	}
 	for _, field := range []string{"contract_index", "context_pack", "findings", "finding_resolutions", "blockers", "failure"} {
 		if value, ok := meta[field]; ok {
@@ -1949,12 +1964,20 @@ func readFDLRoleMeta(path string) (map[string]any, error) {
 	}
 	for key := range meta {
 		switch key {
-		case "outcome", "decision", "evidence_consistency", "contract_index", "context_pack", "changed_paths_from_workspace", "findings", "finding_resolutions", "blockers", "failure":
+		case "outcome", "decision", "evidence_consistency", "contract_index", "context_pack", "exploration_requests", "changed_paths_from_workspace", "findings", "finding_resolutions", "blockers", "failure":
 		default:
 			return nil, fmt.Errorf("FDL role metadata contains unsupported field %q", key)
 		}
 	}
 	return meta, nil
+}
+
+func fdlPlanningExplorationEvent(binding fdlWorkItemBinding, requests []any) map[string]any {
+	return map[string]any{
+		"envelope_version": 1, "kind": "planning_exploration_requested", "run_id": binding.FDLRunID,
+		"external_work_id": binding.ExternalWorkID, "work_item_id": binding.WorkItemID,
+		"submission_token": binding.SubmissionToken, "requests": requests,
+	}
 }
 
 // materializeFDLDispatch creates per-item private input/result directories and

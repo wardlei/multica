@@ -94,6 +94,17 @@ func TestFDLDispatchAcknowledgementCoversTasksAndFailures(t *testing.T) {
 	}
 }
 
+func TestFDLPlanningExplorationEventPreservesPrivateBinding(t *testing.T) {
+	binding := fdlWorkItemBinding{FDLRunID: "fdl4-run", ExternalWorkID: "work-plan", WorkItemID: "planning", SubmissionToken: "token-private"}
+	event := fdlPlanningExplorationEvent(binding, []any{map[string]any{
+		"request_id": "impact-analysis", "lane": "impact_analysis", "question": "Inspect one file.",
+		"allowed_paths": []any{"src/sample.py"}, "expected_evidence": []any{"files"},
+	}})
+	if event["kind"] != "planning_exploration_requested" || event["run_id"] != binding.FDLRunID || event["external_work_id"] != binding.ExternalWorkID || event["work_item_id"] != binding.WorkItemID || event["submission_token"] != binding.SubmissionToken {
+		t.Fatalf("exploration event lost Controller binding: %#v", event)
+	}
+}
+
 func TestReadFDLRoleMetaRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "meta.json")
 	if err := writeFDLExecutorJSON(path, map[string]any{"outcome": "completed", "token": "must-not-pass"}); err != nil {
