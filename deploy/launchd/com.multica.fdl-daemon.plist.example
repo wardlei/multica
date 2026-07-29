@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.multica.fdl-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__MULTICA_CLI__</string>
+    <string>--profile</string>
+    <string>__MULTICA_PROFILE__</string>
+    <string>daemon</string>
+    <string>start</string>
+    <string>--foreground</string>
+    <string>--no-auto-update</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MULTICA_FDL_EXECUTOR_ENABLED</key>
+    <string>1</string>
+    <key>MULTICA_FDL_CLI</key>
+    <string>__FDL_CLI__</string>
+    <key>MULTICA_FDL_RUN_ROOT</key>
+    <string>__FDL_RUN_ROOT__</string>
+    <key>MULTICA_FDL_POLL_INTERVAL</key>
+    <string>5s</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__STDOUT_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__STDERR_LOG__</string>
+</dict>
+</plist>
