@@ -2397,6 +2397,50 @@ type CreateIssueRequest struct {
 	AllowDuplicate bool `json:"allow_duplicate,omitempty"`
 }
 
+// quickCreateAssignee returns the squad stored on the trusted quick-create
+// task when the issuing agent is acting as that task's execution carrier.
+// A quick-create task is agent-scoped for daemon dispatch, but its SquadID
+// records the user's actual assignment target and must win over CLI arguments.
+func (h *Handler) quickCreateAssignee(ctx context.Context, r *http.Request, workspaceID pgtype.UUID, creatorType, creatorID string, originID pgtype.UUID, assigneeType pgtype.Text, assigneeID pgtype.UUID) (pgtype.Text, pgtype.UUID, string) {
+	if creatorType != "agent" {
+		return assigneeType, assigneeID, ""
+	}
+
+	taskID, err := util.ParseUUID(r.Header.Get("X-Task-ID"))
+	if err != nil || taskID != originID {
+		// The task-scoped token normally supplies this header. Preserve the
+		// existing behavior for non-daemon callers that merely use the
+		// quick_create origin marker without a matching execution task.
+		return assigneeType, assigneeID, ""
+	}
+	task, err := h.Queries.GetAgentTask(ctx, taskID)
+	if err != nil || uuidToString(task.AgentID) != creatorID {
+		return assigneeType, assigneeID, ""
+	}
+
+	var qc service.QuickCreateContext
+	if err := json.Unmarshal(task.Context, &qc); err != nil || qc.Type != service.QuickCreateContextType || qc.SquadID == "" {
+		return assigneeType, assigneeID, ""
+	}
+	if qc.WorkspaceID != uuidToString(workspaceID) {
+		return assigneeType, assigneeID, "quick-create task does not belong to this workspace"
+	}
+
+	squadID, err := util.ParseUUID(qc.SquadID)
+	if err != nil {
+		return assigneeType, assigneeID, "quick-create task has an invalid squad"
+	}
+	squad, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+		ID:          squadID,
+		WorkspaceID: workspaceID,
+	})
+	if err != nil || squad.ArchivedAt.Valid {
+		return assigneeType, assigneeID, "quick-create squad is no longer available"
+	}
+
+	return pgtype.Text{String: "squad", Valid: true}, squad.ID, ""
+}
+
 func duplicateIssueMessage(issue IssueResponse) string {
 	return issueguard.DuplicateMessage(issue.Identifier, issue.Title, issue.Status)
 }
@@ -2455,11 +2499,6 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		assigneeID = id
-	}
-
-	if status, msg := h.validateAssigneePair(r.Context(), r, workspaceID, assigneeType, assigneeID); status != 0 {
-		writeError(w, status, msg)
-		return
 	}
 
 	var parentIssueID pgtype.UUID
@@ -2565,6 +2604,25 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// A quick-create task may be dispatched to a squad leader, but that leader
+	// is only the execution carrier. The task context is the authoritative
+	// record of the assignee the user selected. Do not let an agent accidentally
+	// turn a squad assignment into an assignment to itself by passing its own ID
+	// to `multica issue create`.
+	if originType.Valid && originType.String == "quick_create" {
+		var errMsg string
+		assigneeType, assigneeID, errMsg = h.quickCreateAssignee(r.Context(), r, wsUUID, creatorType, actualCreatorID, originID, assigneeType, assigneeID)
+		if errMsg != "" {
+			writeError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+	}
+
+	if status, msg := h.validateAssigneePair(r.Context(), r, workspaceID, assigneeType, assigneeID); status != 0 {
+		writeError(w, status, msg)
+		return
 	}
 
 	// Prefix is workspace-level; pre-compute once so both the broadcast
