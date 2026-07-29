@@ -118,6 +118,15 @@ func TestNewFDLDispatchCheckpointIsDisabledInProductionBuild(t *testing.T) {
 	}
 }
 
+func TestFDLTerminationAlreadyApplied(t *testing.T) {
+	if !fdlTerminationAlreadyApplied(errors.New(`FDL terminate-run: exit status 2: {"error": "terminal run cannot be terminated again"}`)) {
+		t.Fatal("terminal Controller rejection was not accepted as an idempotent cancellation")
+	}
+	if fdlTerminationAlreadyApplied(errors.New("FDL terminate-run: exit status 2")) {
+		t.Fatal("unclassified termination failure was accepted")
+	}
+}
+
 func TestFDLPlanningExplorationEventPreservesPrivateBinding(t *testing.T) {
 	binding := fdlWorkItemBinding{FDLRunID: "fdl4-run", ExternalWorkID: "work-plan", WorkItemID: "planning", SubmissionToken: "token-private"}
 	event := fdlPlanningExplorationEvent(binding, []any{map[string]any{

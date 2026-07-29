@@ -410,7 +410,7 @@ func (d *Daemon) terminateFDLRun(ctx context.Context, run PendingFDLIssueRun) er
 		}
 	}
 	if !receipt.Terminated {
-		if err := d.runFDLCommand(ctx, "terminate-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, run.ID), "--status", "cancelled", "--reason", "Issue cancelled in Multica", "--operation-id", receipt.OperationID); err != nil {
+		if err := d.runFDLCommand(ctx, "terminate-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, run.ID), "--status", "cancelled", "--reason", "Issue cancelled in Multica", "--operation-id", receipt.OperationID); err != nil && !fdlTerminationAlreadyApplied(err) {
 			return fmt.Errorf("terminate FDL Controller run: %w", err)
 		}
 		receipt.Terminated = true
@@ -420,6 +420,10 @@ func (d *Daemon) terminateFDLRun(ctx context.Context, run PendingFDLIssueRun) er
 		}
 	}
 	return d.client.CancelFDLIssueRun(ctx, run.FDLRuntimeID, run.ID, "Issue cancelled; Controller terminated and direct tasks cancelled")
+}
+
+func fdlTerminationAlreadyApplied(err error) bool {
+	return err != nil && strings.Contains(err.Error(), `"error": "terminal run cannot be terminated again"`)
 }
 
 func (d *Daemon) readOrInitializeFDLRun(ctx context.Context, runRoot, configPath string) (string, error) {
