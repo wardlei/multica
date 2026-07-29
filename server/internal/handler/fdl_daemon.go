@@ -194,7 +194,7 @@ func validateFDLProjectionRequest(req fdlProjectionRequest) (map[string]any, boo
 		}
 	}
 	if req.DecisionActionID != "" || req.DecisionKind != "" || len(req.AllowedDecisions) > 0 {
-		if req.Status != "awaiting_human_decision" || len(req.DecisionActionID) > 256 || len(req.DecisionKind) > 80 || req.DecisionActionID == "" || req.DecisionKind == "" || !validFDLDecisionChoices(req.AllowedDecisions) {
+		if (req.Status != "awaiting_human_decision" && req.Status != "recovering") || len(req.DecisionActionID) > 256 || len(req.DecisionKind) > 80 || req.DecisionActionID == "" || req.DecisionKind == "" || !validFDLDecisionChoices(req.AllowedDecisions) {
 			return nil, false
 		}
 		projection["decision_action_id"] = req.DecisionActionID

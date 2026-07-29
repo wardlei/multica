@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -180,5 +184,84 @@ func TestFDLHumanDecisionChoicesFollowControllerCheckpointKind(t *testing.T) {
 		if ok != tt.ok || !slices.Equal(got, tt.want) {
 			t.Fatalf("fdlDecisionChoices(%q) = (%v, %v), want (%v, %v)", tt.kind, got, ok, tt.want, tt.ok)
 		}
+	}
+}
+
+func TestFDLMailboxRecoveryParsesOnlyCurrentAction(t *testing.T) {
+	mailbox := &fdlExecutorMailbox{
+		SchemaVersion: 1, FDLRunID: "fdl-run", ActionID: "recover-action", ActionKind: "recover_external_work",
+		Envelope: []byte(`{"run_id":"fdl-run","next_action":{"action_id":"recover-action","kind":"recover_external_work","external_work_id":"private-work","work_items":["private-item"]}}`),
+	}
+	action, err := fdlMailboxRecovery(mailbox)
+	if err != nil {
+		t.Fatalf("fdlMailboxRecovery: %v", err)
+	}
+	if action.ExternalWorkID != "private-work" || !slices.Equal(action.WorkItems, []string{"private-item"}) {
+		t.Fatalf("recovery action = %#v", action)
+	}
+	mailbox.ActionID = "different-action"
+	if _, err := fdlMailboxRecovery(mailbox); err == nil {
+		t.Fatal("mismatched mailbox action was accepted")
+	}
+}
+
+func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testing.T) {
+	completed := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/daemon/fdl-runs/local-run/decisions/decision-1/complete" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var request struct {
+			OperationID string `json:"operation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode completion request: %v", err)
+		}
+		if request.OperationID != "recovery-op" {
+			t.Fatalf("completion operation = %q, want recovery-op", request.OperationID)
+		}
+		completed = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	d := &Daemon{
+		cfg:    Config{FDLRunRoot: filepath.Join(root, "fdl-runs")},
+		client: NewClient(server.URL),
+	}
+	stateDir := d.fdlExecutorStateDir("local-run")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("create executor state: %v", err)
+	}
+	returnedEnvelope := json.RawMessage(`{"run_id":"controller-run","next_action":{"action_id":"next-action","kind":"await_external_results"}}`)
+	receipt := fdlRecoveryReceipt{
+		SchemaVersion: 1, DecisionID: "decision-1", FDLRunID: "controller-run", ActionID: "recover-action",
+		ExternalWorkID: "private-work", WorkItemID: "private-item", SubmissionToken: "private-token",
+		Resolution: "retry", OperationID: "recovery-op", ControllerSubmitted: true, ReturnedEnvelope: returnedEnvelope,
+	}
+	if err := writeFDLExecutorJSON(d.recoveryReceiptPath("local-run"), receipt); err != nil {
+		t.Fatalf("write recovery receipt: %v", err)
+	}
+	mailbox := &fdlExecutorMailbox{
+		SchemaVersion: 1, FDLRunID: "controller-run", ActionID: "recover-action", ActionKind: "recover_external_work",
+		Envelope: json.RawMessage(`{"run_id":"controller-run","next_action":{"action_id":"recover-action","kind":"recover_external_work"}}`),
+	}
+
+	if err := d.recoverFDLRecoveryReceipt(context.Background(), "local-run", mailbox); err != nil {
+		t.Fatalf("recover FDL recovery receipt: %v", err)
+	}
+	if !completed {
+		t.Fatal("expected daemon to complete the already accepted recovery decision")
+	}
+	if _, err := os.Stat(d.recoveryReceiptPath("local-run")); !os.IsNotExist(err) {
+		t.Fatalf("recovery receipt still exists after finalization: %v", err)
+	}
+	next, err := readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
+	if err != nil {
+		t.Fatalf("read advanced mailbox: %v", err)
+	}
+	if next == nil || next.ActionID != "next-action" || next.ActionKind != "await_external_results" {
+		t.Fatalf("mailbox was not advanced to Controller reply: %#v", next)
 	}
 }

@@ -185,7 +185,7 @@ func (h *Handler) SubmitFDLHumanDecision(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var projection fdlDecisionProjection
-	if json.Unmarshal(run.StateProjection, &projection) != nil || run.Status != "awaiting_human_decision" || projection.DecisionActionID != request.ActionID || !fdlDecisionAllowed(projection.AllowedDecisions, request.Decision) {
+	if json.Unmarshal(run.StateProjection, &projection) != nil || (run.Status != "awaiting_human_decision" && run.Status != "recovering") || projection.DecisionActionID != request.ActionID || !fdlDecisionAllowed(projection.AllowedDecisions, request.Decision) {
 		writeError(w, http.StatusConflict, "FDL decision action is no longer current")
 		return
 	}

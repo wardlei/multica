@@ -112,6 +112,24 @@ type fdlHandoffReceipt struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
+// fdlRecoveryReceipt binds one explicit human retry/cancel choice to the
+// failed Controller work item. The token stays local even while the choice is
+// visible as a safe action ID in the UI.
+type fdlRecoveryReceipt struct {
+	SchemaVersion       int             `json:"schema_version"`
+	DecisionID          string          `json:"decision_id"`
+	FDLRunID            string          `json:"fdl_run_id"`
+	ActionID            string          `json:"action_id"`
+	ExternalWorkID      string          `json:"external_work_id"`
+	WorkItemID          string          `json:"work_item_id"`
+	SubmissionToken     string          `json:"submission_token"`
+	Resolution          string          `json:"resolution"`
+	OperationID         string          `json:"operation_id"`
+	ControllerSubmitted bool            `json:"controller_submitted"`
+	ReturnedEnvelope    json.RawMessage `json:"returned_envelope,omitempty"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+}
+
 // fdlExecutorLoop owns the local side of a frozen Controller run. It never
 // derives work from comments or legacy Squad leader behavior.
 func (d *Daemon) fdlExecutorLoop(ctx context.Context) {
@@ -253,6 +271,13 @@ func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) 
 		if err := d.recoverFDLDecisionReceipt(ctx, run.ID, mailbox); err != nil {
 			return err
 		}
+		mailbox, err = readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
+		if err != nil {
+			return err
+		}
+		if err := d.recoverFDLRecoveryReceipt(ctx, run.ID, mailbox); err != nil {
+			return err
+		}
 		// Decision recovery can advance the Controller action after its durable
 		// receipt is acknowledged. Re-read before consuming the mailbox again.
 		mailbox, err = readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
@@ -303,8 +328,12 @@ func (d *Daemon) processFDLMailbox(ctx context.Context, run PendingFDLIssueRun, 
 	switch mailbox.ActionKind {
 	case "request_human_decision":
 		return d.processFDLHumanDecision(ctx, run, mailbox)
+	case "recover_external_work":
+		return d.processFDLExternalRecovery(ctx, run, mailbox)
 	case "handoff_external":
 		return d.processFDLHandoff(ctx, run, mailbox)
+	case "stop":
+		return d.projectFDLStop(ctx, run, mailbox)
 	}
 	if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
 		if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
@@ -505,6 +534,8 @@ func fdlProjectionPhase(phase string) string {
 	switch phase {
 	case "intake", "pre_design", "design", "implementation", "review", "handoff":
 		return phase
+	case "planning":
+		return "design"
 	default:
 		return "setup"
 	}
@@ -1009,6 +1040,178 @@ func (d *Daemon) processFDLHumanDecision(ctx context.Context, run PendingFDLIssu
 	return d.submitFDLHumanDecision(ctx, run.ID, mailbox, decision)
 }
 
+type fdlRecoveryAction struct {
+	ExternalWorkID string   `json:"external_work_id"`
+	WorkItems      []string `json:"work_items"`
+}
+
+func fdlMailboxRecovery(mailbox *fdlExecutorMailbox) (fdlRecoveryAction, error) {
+	var envelope struct {
+		RunID      string `json:"run_id"`
+		NextAction struct {
+			ActionID string `json:"action_id"`
+			Kind     string `json:"kind"`
+			// The Controller keeps recovery item identities in the action. They
+			// remain local because this envelope never leaves the executor.
+			ExternalWorkID string   `json:"external_work_id"`
+			WorkItems      []string `json:"work_items"`
+		} `json:"next_action"`
+	}
+	if json.Unmarshal(mailbox.Envelope, &envelope) != nil || envelope.RunID != mailbox.FDLRunID || envelope.NextAction.ActionID != mailbox.ActionID || envelope.NextAction.Kind != "recover_external_work" || envelope.NextAction.ExternalWorkID == "" || len(envelope.NextAction.WorkItems) == 0 {
+		return fdlRecoveryAction{}, fmt.Errorf("decode FDL recovery action")
+	}
+	return fdlRecoveryAction{ExternalWorkID: envelope.NextAction.ExternalWorkID, WorkItems: envelope.NextAction.WorkItems}, nil
+}
+
+func (d *Daemon) recoveryReceiptPath(runID string) string {
+	return filepath.Join(d.fdlExecutorStateDir(runID), "recovery-receipt.json")
+}
+
+func (d *Daemon) processFDLExternalRecovery(ctx context.Context, run PendingFDLIssueRun, mailbox *fdlExecutorMailbox) error {
+	action, err := fdlMailboxRecovery(mailbox)
+	if err != nil {
+		return err
+	}
+	workItemID := action.WorkItems[0]
+	var binding fdlWorkItemBinding
+	found, err := readFDLExecutorJSON(d.fdlBindingPath(run.ID, workItemID), &binding)
+	if err != nil || !found {
+		return fmt.Errorf("read failed FDL work-item binding for recovery")
+	}
+	if binding.FDLRunID != mailbox.FDLRunID || binding.ExternalWorkID != action.ExternalWorkID || binding.WorkItemID != workItemID || binding.SubmissionToken == "" {
+		return fmt.Errorf("FDL recovery action does not match private work-item binding")
+	}
+	payload, err := d.readFDLDispatchPayload(run.ID, workItemID)
+	if err != nil {
+		return err
+	}
+	if err := d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+		Status: "recovering", Phase: fdlProjectionPhase(payload.Attempt.Phase),
+		WaitingReason: "A failed FDL work item requires an explicit retry or cancellation", ActionType: mailbox.ActionKind,
+		DecisionActionID: mailbox.ActionID, DecisionKind: "external_work_recovery", AllowedDecisions: []string{"retry", "cancel"},
+	}); err != nil {
+		return err
+	}
+	decision, err := d.client.GetFDLHumanDecision(ctx, run.ID, mailbox.ActionID)
+	if err != nil {
+		var requestErr *requestError
+		if errors.As(err, &requestErr) && requestErr.StatusCode == 404 {
+			return nil
+		}
+		return fmt.Errorf("load FDL recovery resolution: %w", err)
+	}
+	if decision.ActionID != mailbox.ActionID || (decision.Decision != "retry" && decision.Decision != "cancel") {
+		return fmt.Errorf("FDL recovery resolution does not match current Controller action")
+	}
+	return d.submitFDLRecoveryResolution(ctx, run.ID, mailbox, binding, decision)
+}
+
+func (d *Daemon) submitFDLRecoveryResolution(ctx context.Context, runID string, mailbox *fdlExecutorMailbox, binding fdlWorkItemBinding, decision FDLHumanDecision) error {
+	receiptPath := d.recoveryReceiptPath(runID)
+	var receipt fdlRecoveryReceipt
+	found, err := readFDLExecutorJSON(receiptPath, &receipt)
+	if err != nil {
+		return err
+	}
+	if found {
+		if receipt.SchemaVersion != 1 || receipt.DecisionID != decision.ID || receipt.FDLRunID != mailbox.FDLRunID || receipt.ActionID != mailbox.ActionID || receipt.ExternalWorkID != binding.ExternalWorkID || receipt.WorkItemID != binding.WorkItemID || receipt.SubmissionToken != binding.SubmissionToken || receipt.Resolution != decision.Decision || receipt.OperationID == "" {
+			return fmt.Errorf("FDL recovery receipt conflicts with mailbox")
+		}
+	} else {
+		if decision.Status == "pending" {
+			operationID, err := newFDLOperationID()
+			if err != nil {
+				return err
+			}
+			decision, err = d.client.ClaimFDLHumanDecision(ctx, runID, decision.ID, operationID)
+			if err != nil {
+				return fmt.Errorf("claim FDL recovery resolution: %w", err)
+			}
+		}
+		if decision.Status != "processing" || decision.OperationID == nil || *decision.OperationID == "" {
+			return fmt.Errorf("FDL recovery resolution has no recoverable operation")
+		}
+		receipt = fdlRecoveryReceipt{
+			SchemaVersion: 1, DecisionID: decision.ID, FDLRunID: mailbox.FDLRunID, ActionID: mailbox.ActionID,
+			ExternalWorkID: binding.ExternalWorkID, WorkItemID: binding.WorkItemID, SubmissionToken: binding.SubmissionToken,
+			Resolution: decision.Decision, OperationID: *decision.OperationID, UpdatedAt: time.Now().UTC(),
+		}
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	if !receipt.ControllerSubmitted {
+		event := map[string]any{
+			"envelope_version": 1, "kind": "external_work_abandoned", "run_id": receipt.FDLRunID,
+			"external_work_id": receipt.ExternalWorkID, "work_item_id": receipt.WorkItemID,
+			"submission_token": receipt.SubmissionToken, "resolution": receipt.Resolution,
+			"reason": "Human selected an explicit FDL recovery resolution",
+		}
+		if receipt.Resolution == "cancel" {
+			event["terminal_status"] = "cancelled"
+		}
+		eventPath := filepath.Join(d.fdlExecutorStateDir(runID), "recovery-event.json")
+		if err := writeFDLExecutorJSON(eventPath, event); err != nil {
+			return err
+		}
+		output, err := d.runFDLCommandOutput(ctx, "drive-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--operation-id", receipt.OperationID, "--event", eventPath)
+		if err != nil {
+			return fmt.Errorf("submit FDL recovery resolution: %w", err)
+		}
+		if err := validateFDLReturnedEnvelope(output, receipt.FDLRunID); err != nil {
+			return err
+		}
+		receipt.ControllerSubmitted = true
+		receipt.ReturnedEnvelope = output
+		receipt.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	return d.finalizeFDLRecoveryReceipt(ctx, runID, receipt)
+}
+
+func (d *Daemon) recoverFDLRecoveryReceipt(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+	var receipt fdlRecoveryReceipt
+	found, err := readFDLExecutorJSON(d.recoveryReceiptPath(runID), &receipt)
+	if err != nil || !found {
+		return err
+	}
+	if receipt.SchemaVersion != 1 || receipt.DecisionID == "" || receipt.FDLRunID == "" || receipt.ActionID == "" || receipt.ExternalWorkID == "" || receipt.WorkItemID == "" || receipt.SubmissionToken == "" || (receipt.Resolution != "retry" && receipt.Resolution != "cancel") || receipt.OperationID == "" {
+		return fmt.Errorf("invalid FDL recovery receipt")
+	}
+	if !receipt.ControllerSubmitted {
+		if mailbox == nil || mailbox.FDLRunID != receipt.FDLRunID || mailbox.ActionID != receipt.ActionID || mailbox.ActionKind != "recover_external_work" {
+			return fmt.Errorf("unsubmitted FDL recovery receipt conflicts with mailbox")
+		}
+		return nil
+	}
+	if err := validateFDLReturnedEnvelope(receipt.ReturnedEnvelope, receipt.FDLRunID); err != nil {
+		return err
+	}
+	returned := fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)
+	if mailbox != nil && mailbox.ActionID != receipt.ActionID && mailbox.ActionID != returned.ActionID {
+		return fmt.Errorf("submitted FDL recovery receipt conflicts with mailbox")
+	}
+	return d.finalizeFDLRecoveryReceipt(ctx, runID, receipt)
+}
+
+func (d *Daemon) finalizeFDLRecoveryReceipt(ctx context.Context, runID string, receipt fdlRecoveryReceipt) error {
+	if err := d.client.CompleteFDLHumanDecision(ctx, runID, receipt.DecisionID, receipt.OperationID); err != nil {
+		return fmt.Errorf("complete FDL recovery resolution: %w", err)
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
+		return err
+	}
+	if err := os.Remove(d.recoveryReceiptPath(runID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove completed FDL recovery receipt: %w", err)
+	}
+	if err := os.Remove(filepath.Join(d.fdlExecutorStateDir(runID), "recovery-event.json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove submitted FDL recovery event: %w", err)
+	}
+	return nil
+}
+
 func fdlDecisionAllowed(choices []string, decision string) bool {
 	for _, choice := range choices {
 		if decision == choice {
@@ -1166,6 +1369,30 @@ func (d *Daemon) processFDLHandoff(ctx context.Context, run PendingFDLIssueRun, 
 	}
 	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
 		Status: "handoff_ready", Phase: "handoff", Summary: "FDL run is verified and ready for an independent Git workflow.", ActionType: "handoff_external",
+	})
+}
+
+func (d *Daemon) projectFDLStop(ctx context.Context, run PendingFDLIssueRun, mailbox *fdlExecutorMailbox) error {
+	var envelope struct {
+		RunID string `json:"run_id"`
+		State struct {
+			Status string `json:"status"`
+			Phase  string `json:"phase"`
+		} `json:"state"`
+		NextAction struct {
+			ActionID string `json:"action_id"`
+			Kind     string `json:"kind"`
+		} `json:"next_action"`
+	}
+	if json.Unmarshal(mailbox.Envelope, &envelope) != nil || envelope.RunID != mailbox.FDLRunID || envelope.NextAction.ActionID != mailbox.ActionID || envelope.NextAction.Kind != "stop" || (envelope.State.Status != "failed" && envelope.State.Status != "cancelled") {
+		return fmt.Errorf("decode terminal FDL Controller envelope")
+	}
+	phase := "complete"
+	if envelope.State.Status == "cancelled" {
+		phase = "cancelled"
+	}
+	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+		Status: envelope.State.Status, Phase: phase, Summary: "FDL Controller stopped the delivery run.", ActionType: "stop",
 	})
 }
 

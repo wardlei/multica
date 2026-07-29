@@ -341,6 +341,32 @@ func TestDaemonFDLRunLifecycleIsWorktreeBoundAndSnapshotsIssue(t *testing.T) {
 		t.Fatalf("reset FDL projection: expected 200, got %d: %s", resetProjectionRecorder.Code, resetProjectionRecorder.Body.String())
 	}
 
+	// Recovery uses the same durable user-action boundary, but accepts only the
+	// retry/cancel choices surfaced by the daemon's current Controller action.
+	recoveryActionID := "fdl-recovery-action-001"
+	recoveryProjectionRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/projection", strings.NewReader(`{"status":"recovering","phase":"implementation","action_type":"recover_external_work","decision_action_id":"`+recoveryActionID+`","decision_kind":"external_work_recovery","allowed_decisions":["retry","cancel"]}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
+	recoveryProjectionRecorder := httptest.NewRecorder()
+	testHandler.UpdateFDLIssueRunProjectionForDaemon(recoveryProjectionRecorder, recoveryProjectionRequest)
+	if recoveryProjectionRecorder.Code != http.StatusOK {
+		t.Fatalf("project FDL recovery: expected 200, got %d: %s", recoveryProjectionRecorder.Code, recoveryProjectionRecorder.Body.String())
+	}
+	recoveryDecisionRecorder := httptest.NewRecorder()
+	testHandler.SubmitFDLHumanDecision(recoveryDecisionRecorder, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/fdl-run/decisions?workspace_id="+testWorkspaceID, map[string]string{"action_id": recoveryActionID, "decision": "retry"}), "id", issue.ID))
+	if recoveryDecisionRecorder.Code != http.StatusAccepted {
+		t.Fatalf("submit FDL recovery resolution: expected 202, got %d: %s", recoveryDecisionRecorder.Code, recoveryDecisionRecorder.Body.String())
+	}
+	invalidRecoveryRecorder := httptest.NewRecorder()
+	testHandler.SubmitFDLHumanDecision(invalidRecoveryRecorder, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/fdl-run/decisions?workspace_id="+testWorkspaceID, map[string]string{"action_id": recoveryActionID, "decision": "approve"}), "id", issue.ID))
+	if invalidRecoveryRecorder.Code != http.StatusConflict {
+		t.Fatalf("invalid FDL recovery resolution: expected 409, got %d: %s", invalidRecoveryRecorder.Code, invalidRecoveryRecorder.Body.String())
+	}
+	resetAfterRecoveryRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/projection", strings.NewReader(`{"status":"running","phase":"intake"}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
+	resetAfterRecoveryRecorder := httptest.NewRecorder()
+	testHandler.UpdateFDLIssueRunProjectionForDaemon(resetAfterRecoveryRecorder, resetAfterRecoveryRequest)
+	if resetAfterRecoveryRecorder.Code != http.StatusOK {
+		t.Fatalf("reset FDL recovery projection: expected 200, got %d: %s", resetAfterRecoveryRecorder.Code, resetAfterRecoveryRecorder.Body.String())
+	}
+
 	missingIsolationRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/tasks", strings.NewReader(`{"role":"reviewer:correctness","instructions":"Review only the supplied snapshot.","dispatch_key":"multica-review-without-isolation-001","execution_workspace":null}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
 	missingIsolationRecorder := httptest.NewRecorder()
 	testHandler.CreateFDLAgentTaskForDaemon(missingIsolationRecorder, missingIsolationRequest)

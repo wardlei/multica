@@ -40,7 +40,9 @@ export function FDLDeliveryStatus({ issueId }: { issueId: string }) {
       typeof choice === "string" && ["accept", "approve", "reject", "retry", "cancel"].includes(choice),
     )
     : [];
-  const canSubmitDecision = run.status === "awaiting_human_decision" && !!decisionActionID && allowedDecisions.length > 0;
+  const canSubmitDecision = (run.status === "awaiting_human_decision" || run.status === "recovering")
+    && !!decisionActionID
+    && allowedDecisions.length > 0;
 
   return (
     <section className="rounded-md border bg-muted/20 px-3 py-2.5 text-xs">
