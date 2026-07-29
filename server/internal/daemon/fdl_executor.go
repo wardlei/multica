@@ -779,6 +779,10 @@ Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-00
 	if binding.Role == "implementer" {
 		changeInstruction = `Do not set changed_paths_from_workspace in meta.json. The executor derives the actual changed paths from your frozen workspace after you finish.`
 	}
+	reviewerInstruction := ""
+	if strings.HasPrefix(binding.Role, "reviewer:") {
+		reviewerInstruction = `Do not execute any Gate command or report an environment/tooling failure: the Controller-provided Gate evidence is already authoritative. Create a finding only for a concrete violation in the supplied snapshot of an accepted AC-/INV- contract key. For an accepted review, write {"outcome":"completed","decision":"accepted","evidence_consistency":"checked","findings":[]}. For requested changes, write {"outcome":"blocked","decision":"changes_requested","evidence_consistency":"checked","findings":[{"category":"correctness","severity":"P1","subject_identity":{"path":"relative/file"},"violated_contract_key":"AC-CORE-001","evidence_refs":["report.md"],"target_phase":"implementation","reason":"concrete contract violation"}]}. Every finding must have exactly category, severity, subject_identity, violated_contract_key, evidence_refs, target_phase, and reason; do not use title, evidence, required_action, or other fields.`
+	}
 	instructions := fmt.Sprintf(`You are the frozen FDL delivery role %q.
 
 Execute only this Controller instruction payload:
@@ -796,7 +800,8 @@ Write JSON metadata to %s only when required above or when you need to report a 
 
 %s
 %s
-%s`, binding.Role, prettyInstructions.String(), prettyIssueInput.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), consistencyInstruction, changeInstruction, contractInstruction)
+%s
+%s`, binding.Role, prettyInstructions.String(), prettyIssueInput.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), consistencyInstruction, changeInstruction, contractInstruction, reviewerInstruction)
 	if len(instructions) > 20000 {
 		return "", fmt.Errorf("FDL Agent instructions exceed the direct-task limit")
 	}

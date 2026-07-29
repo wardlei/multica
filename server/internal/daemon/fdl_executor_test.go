@@ -149,6 +149,9 @@ func TestFDLAgentInstructionsReserveContextPackForPlanning(t *testing.T) {
 	if !strings.Contains(instructions, "Planning is the only role that may set contract_index or context_pack") {
 		t.Fatalf("review instructions did not reserve planning evidence: %s", instructions)
 	}
+	if !strings.Contains(instructions, "Do not execute any Gate command") || !strings.Contains(instructions, "Every finding must have exactly") {
+		t.Fatalf("review instructions did not provide the strict result contract: %s", instructions)
+	}
 }
 
 func TestPersistFDLIssueInputRejectsMissingOrOversizedTitle(t *testing.T) {
