@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -100,6 +101,74 @@ func TestReadFDLRoleMetaRejectsUnknownFields(t *testing.T) {
 	}
 	if _, err := readFDLRoleMeta(path); err == nil {
 		t.Fatal("metadata with an unknown field was accepted")
+	}
+}
+
+func TestReadFDLRoleMetaAllowsReviewerFindingResolutions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.json")
+	if err := writeFDLExecutorJSON(path, map[string]any{"finding_resolutions": []any{}}); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if _, err := readFDLRoleMeta(path); err != nil {
+		t.Fatalf("reviewer finding resolutions were rejected: %v", err)
+	}
+}
+
+func TestFDLAgentInstructionsRequireConsistencyForContextPackConsumers(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	payload := fdlDispatchPayload{Instructions: json.RawMessage(`{"task":"implement"}`), InputHashes: map[string]string{"context_pack_hash": "sha256:pack"}}
+	payload.Attempt.Role = "feature-delivery-implementer"
+	payload.Attempt.Phase = "implementation"
+	instructions, err := d.fdlAgentInstructions("run", fdlWorkItemBinding{WorkItemID: "implementation", Role: "implementer"}, payload)
+	if err != nil {
+		t.Fatalf("build instructions: %v", err)
+	}
+	if !strings.Contains(instructions, "MUST write meta.json") || !strings.Contains(instructions, "never use not_applicable") {
+		t.Fatalf("Context Pack consistency requirement missing from instructions: %s", instructions)
+	}
+}
+
+func TestFDLRequiresEvidenceConsistency(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  string
+		hashes map[string]string
+		want   bool
+	}{
+		{name: "planning producer", phase: "planning", want: true},
+		{name: "design producer", phase: "design", want: true},
+		{name: "implementation consumer", phase: "implementation", hashes: map[string]string{"context_pack_hash": "sha256:pack"}, want: true},
+		{name: "ordinary implementation", phase: "implementation", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := fdlDispatchPayload{InputHashes: tt.hashes}
+			payload.Attempt.Phase = tt.phase
+			if got := fdlRequiresEvidenceConsistency(payload); got != tt.want {
+				t.Fatalf("fdlRequiresEvidenceConsistency() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFDLExtractsWorkspaceChangesOnlyForImplementation(t *testing.T) {
+	for _, phase := range []string{"planning", "design", "implementation", "review"} {
+		t.Run(phase, func(t *testing.T) {
+			payload := fdlDispatchPayload{}
+			payload.Attempt.Phase = phase
+			if got, want := fdlExtractsWorkspaceChanges(payload), phase == "implementation"; got != want {
+				t.Fatalf("fdlExtractsWorkspaceChanges(%q) = %v, want %v", phase, got, want)
+			}
+		})
+	}
+}
+
+func TestFDLControllerRejectedTerminalResult(t *testing.T) {
+	if !fdlControllerRejectedTerminalResult(fmt.Errorf("FDL drive-run: exit status 2: invalid result")) {
+		t.Fatal("Controller validation failure was not recognized")
+	}
+	if fdlControllerRejectedTerminalResult(fmt.Errorf("FDL drive-run: exit status 1: temporary transport failure")) {
+		t.Fatal("transport failure was incorrectly treated as a Controller validation failure")
 	}
 }
 

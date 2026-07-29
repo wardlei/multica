@@ -110,6 +110,12 @@ func codeWorktreeAssignmentForTask(task Task, daemonID string) (*localDirectoryA
 	if realPath != expected.CanonicalPath {
 		return nil, fmt.Errorf("worktree_preflight_error: canonical path drift: got %q, want %q", realPath, expected.CanonicalPath)
 	}
+	if task.FDLDirect {
+		// The FDL Controller, not a new direct task, owns the implementation
+		// snapshot. A recovery task may therefore resume an allowed dirty
+		// snapshot that the Controller has not accepted yet.
+		expected.MustBeClean = false
+	}
 	if err := verifyCodeWorktree(absPath, expected); err != nil {
 		return nil, err
 	}

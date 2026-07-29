@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,5 +42,13 @@ func TestInspectCodeWorktreeAndPreflight(t *testing.T) {
 	}
 	if err := verifyCodeWorktree(dir, context); err == nil {
 		t.Fatal("expected dirty worktree preflight failure")
+	}
+	encoded, err := json.Marshal(context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := codeWorktreeAssignmentForTask(Task{FDLDirect: true, WorktreeContext: encoded}, "daemon-a")
+	if err != nil || assignment == nil || assignment.AbsPath != dir {
+		t.Fatalf("FDL direct task did not accept Controller-owned dirty snapshot: assignment=%#v err=%v", assignment, err)
 	}
 }

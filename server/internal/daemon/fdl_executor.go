@@ -753,6 +753,14 @@ For the compact delivery plan, meta.json must include a contract_index object wi
 Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-001 are invalid. Your Markdown delivery plan must explicitly cite every AC-/INV- key declared in contract_index, and must not introduce an uncatalogued acceptance criterion or invariant. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
 `
 	}
+	consistencyInstruction := `If you write metadata, set evidence_consistency=not_applicable unless the Controller instruction exposes Context Pack evidence.`
+	if fdlRequiresEvidenceConsistency(payload) {
+		consistencyInstruction = `You MUST write meta.json and set evidence_consistency=checked after comparing the exposed Context Pack evidence with your report. If you find a conflict, set evidence_consistency=conflict_found and provide the required blocker or review finding; never use not_applicable for this work item.`
+	}
+	changeInstruction := ""
+	if binding.Role == "implementer" {
+		changeInstruction = `Do not set changed_paths_from_workspace in meta.json. The executor derives the actual changed paths from your frozen workspace after you finish.`
+	}
 	return fmt.Sprintf(`You are the frozen FDL delivery role %q.
 
 Execute only this Controller instruction payload:
@@ -762,8 +770,23 @@ Work only in your assigned task workspace and within the frozen change rules. Do
 
 Write the role report in Markdown to:
 %s
-Optionally write JSON metadata to %s with only outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, changed_paths_from_workspace, blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested), findings, or finding_resolutions. All other roles must omit those review-only fields; place ordinary observations in the Markdown report and use blockers only when the work is blocked. Do not include identifiers copied from FDL state; the local executor binds them.
-%s`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), contractInstruction), nil
+Write JSON metadata to %s only when required above or when you need to report a non-default outcome. It may contain only outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested), findings, or finding_resolutions. All other roles must omit those review-only fields; place ordinary observations in the Markdown report and use blockers only when the work is blocked. Do not include identifiers copied from FDL state; the local executor binds them.
+
+%s
+%s
+%s`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), consistencyInstruction, changeInstruction, contractInstruction), nil
+}
+
+func fdlRequiresEvidenceConsistency(payload fdlDispatchPayload) bool {
+	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
+		return true
+	}
+	_, ok := payload.InputHashes["context_pack_hash"]
+	return ok
+}
+
+func fdlExtractsWorkspaceChanges(payload fdlDispatchPayload) bool {
+	return payload.Attempt.Phase == "implementation"
 }
 
 func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
@@ -1544,6 +1567,20 @@ func (d *Daemon) submitFDLTerminalTask(ctx context.Context, runID string, bindin
 	}
 	output, err := d.runFDLCommandOutput(ctx, "drive-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--operation-id", binding.TerminalOperationID, "--event", eventPath)
 	if err != nil {
+		if fdlControllerRejectedTerminalResult(err) {
+			failure := fdlTaskFailureEvent(*binding, "invalid_result", boundedFDLError(err))
+			if writeErr := writeFDLExecutorJSON(eventPath, failure); writeErr != nil {
+				return writeErr
+			}
+			operationID, operationErr := newFDLOperationID()
+			if operationErr != nil {
+				return operationErr
+			}
+			binding.TerminalOperationID = operationID
+			binding.State = "terminal_submitting"
+			binding.UpdatedAt = time.Now().UTC()
+			return writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding)
+		}
 		return fmt.Errorf("submit FDL terminal result for %s: %w", binding.WorkItemID, err)
 	}
 	if err := validateFDLReturnedEnvelope(output, binding.FDLRunID); err != nil {
@@ -1556,6 +1593,10 @@ func (d *Daemon) submitFDLTerminalTask(ctx context.Context, runID string, bindin
 	binding.State = "terminal_submitted"
 	binding.UpdatedAt = time.Now().UTC()
 	return writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding)
+}
+
+func fdlControllerRejectedTerminalResult(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "FDL drive-run: exit status 2:")
 }
 
 func fdlTaskFailureEvent(binding fdlWorkItemBinding, kind, reason string) map[string]any {
@@ -1736,7 +1777,7 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 		// Agent-authored substitute for it.
 		delete(meta, "context_pack")
 	}
-	for _, field := range []string{"contract_index", "context_pack", "findings", "blockers", "failure"} {
+	for _, field := range []string{"contract_index", "context_pack", "findings", "finding_resolutions", "blockers", "failure"} {
 		if value, ok := meta[field]; ok {
 			path := filepath.Join(itemDir, "submission-"+field+".json")
 			if err := writeFDLExecutorJSON(path, value); err != nil {
@@ -1762,8 +1803,10 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 			return nil, fmt.Errorf("FDL role metadata evidence consistency is invalid")
 		}
 		args = append(args, "--evidence-consistency", consistency)
+	} else if fdlRequiresEvidenceConsistency(payload) {
+		return nil, fmt.Errorf("FDL role metadata requires evidence_consistency for Context Pack evidence")
 	}
-	if changedPaths, ok := meta["changed_paths_from_workspace"].(bool); ok && changedPaths {
+	if fdlExtractsWorkspaceChanges(payload) {
 		args = append(args, "--changed-paths-from-workspace")
 	}
 	output, err := d.runFDLCommandOutput(ctx, args...)
@@ -1857,7 +1900,7 @@ func readFDLRoleMeta(path string) (map[string]any, error) {
 	}
 	for key := range meta {
 		switch key {
-		case "outcome", "decision", "evidence_consistency", "contract_index", "context_pack", "changed_paths_from_workspace", "findings", "blockers", "failure":
+		case "outcome", "decision", "evidence_consistency", "contract_index", "context_pack", "changed_paths_from_workspace", "findings", "finding_resolutions", "blockers", "failure":
 		default:
 			return nil, fmt.Errorf("FDL role metadata contains unsupported field %q", key)
 		}
