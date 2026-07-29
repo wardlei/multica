@@ -762,7 +762,7 @@ Work only in your assigned task workspace and within the frozen change rules. Do
 
 Write the role report in Markdown to:
 %s
-Optionally write JSON metadata to %s with only outcome (completed|blocked|failed), decision (accepted|changes_requested), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, changed_paths_from_workspace, findings, blockers, and failure. Do not include identifiers copied from FDL state; the local executor binds them.
+Optionally write JSON metadata to %s with only outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, changed_paths_from_workspace, findings, blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested); all other roles must omit decision. Do not include identifiers copied from FDL state; the local executor binds them.
 %s`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), contractInstruction), nil
 }
 
