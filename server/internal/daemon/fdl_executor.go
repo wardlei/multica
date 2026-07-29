@@ -1377,6 +1377,16 @@ func (d *Daemon) finalizeFDLDecisionReceipt(ctx context.Context, runtimeID, runI
 	if err := d.client.CompleteFDLHumanDecision(ctx, runtimeID, runID, receipt.DecisionID, receipt.OperationID); err != nil {
 		return fmt.Errorf("complete FDL human decision: %w", err)
 	}
+	// A planning or approval decision can immediately yield a dispatch. The
+	// direct-task endpoint accepts only active runs, so restore this projection
+	// before the next executor cycle materializes the returned work item.
+	if projection, dispatch, err := fdlRunningProjectionForDispatch(receipt.ReturnedEnvelope); err != nil {
+		return err
+	} else if dispatch {
+		if err := d.client.UpdateFDLIssueRunProjection(ctx, runtimeID, runID, projection); err != nil {
+			return fmt.Errorf("restore FDL projection after human decision: %w", err)
+		}
+	}
 	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
 		return err
 	}
