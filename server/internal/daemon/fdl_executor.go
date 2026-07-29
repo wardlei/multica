@@ -584,8 +584,10 @@ type fdlDispatchEnvelope struct {
 
 type fdlDispatchPayload struct {
 	Attempt struct {
-		Role  string `json:"role"`
-		Phase string `json:"phase"`
+		Role                string `json:"role"`
+		Phase               string `json:"phase"`
+		AttemptID           string `json:"attempt_id"`
+		ControlManifestHash string `json:"control_manifest_hash"`
 	} `json:"attempt"`
 	Instructions  json.RawMessage            `json:"instructions"`
 	InputHashes   map[string]string          `json:"input_hashes"`
@@ -743,6 +745,14 @@ Write exactly one advisory JSON object to:
 The object must include schema_version=1 and request_id=%q, plus the requested evidence fields.
 `, prettyInstructions.String(), filepath.Join(itemDir, "advisory.json"), binding.WorkItemID), nil
 	}
+	contractInstruction := ""
+	if binding.Role == "planner" {
+		contractInstruction = `
+For the compact delivery plan, meta.json must include a contract_index object with this exact shape:
+{"schema_version":1,"artifact_kind":"delivery_plan","acceptance_criteria":[{"key":"AC-...","statement":"...","supersedes":null}],"acceptance_refs":[],"invariants":[{"key":"INV-...","statement":"...","acceptance_keys":["AC-..."],"supersedes":null}]}
+Use stable AC-/INV- keys. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
+`
+	}
 	return fmt.Sprintf(`You are the frozen FDL delivery role %q.
 
 Execute only this Controller instruction payload:
@@ -753,7 +763,7 @@ Work only in your assigned task workspace and within the frozen change rules. Do
 Write the role report in Markdown to:
 %s
 Optionally write JSON metadata to %s with only outcome (completed|blocked|failed), decision (accepted|changes_requested), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, changed_paths_from_workspace, findings, blockers, and failure. Do not include identifiers copied from FDL state; the local executor binds them.
-`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json")), nil
+%s`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), contractInstruction), nil
 }
 
 func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
@@ -1224,6 +1234,16 @@ func (d *Daemon) finalizeFDLRecoveryReceipt(ctx context.Context, runtimeID, runI
 	if err := d.client.CompleteFDLHumanDecision(ctx, runtimeID, runID, receipt.DecisionID, receipt.OperationID); err != nil {
 		return fmt.Errorf("complete FDL recovery resolution: %w", err)
 	}
+	// A retry can immediately return a new dispatch. Restore the display
+	// projection before the next cycle creates its direct task: that endpoint
+	// intentionally refuses work while the run is still marked recovering.
+	if projection, dispatch, err := fdlRunningProjectionForDispatch(receipt.ReturnedEnvelope); err != nil {
+		return err
+	} else if dispatch {
+		if err := d.client.UpdateFDLIssueRunProjection(ctx, runtimeID, runID, projection); err != nil {
+			return fmt.Errorf("restore FDL projection after recovery: %w", err)
+		}
+	}
 	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
 		return err
 	}
@@ -1234,6 +1254,29 @@ func (d *Daemon) finalizeFDLRecoveryReceipt(ctx context.Context, runtimeID, runI
 		return fmt.Errorf("remove submitted FDL recovery event: %w", err)
 	}
 	return nil
+}
+
+// fdlRunningProjectionForDispatch derives only display-safe facts from a
+// Controller reply. It leaves decisions and terminal actions untouched.
+func fdlRunningProjectionForDispatch(raw json.RawMessage) (FDLProjection, bool, error) {
+	var envelope struct {
+		State struct {
+			Phase string `json:"phase"`
+		} `json:"state"`
+		NextAction struct {
+			Kind string `json:"kind"`
+		} `json:"next_action"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.NextAction.Kind == "" {
+		return FDLProjection{}, false, fmt.Errorf("decode FDL recovery reply")
+	}
+	if !strings.HasPrefix(envelope.NextAction.Kind, "dispatch_") {
+		return FDLProjection{}, false, nil
+	}
+	return FDLProjection{
+		Status: "running", Phase: fdlProjectionPhase(envelope.State.Phase),
+		Summary: "Controller dispatched FDL work after recovery", ActionType: envelope.NextAction.Kind,
+	}, true, nil
 }
 
 func fdlDecisionAllowed(choices []string, decision string) bool {
@@ -1435,6 +1478,11 @@ func (d *Daemon) collectFDLTaskResults(ctx context.Context, runID string, contro
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		// Superseded retry bindings are retained under archive/ for audit, but
+		// no longer represent live Controller work items.
+		if entry.Name() == "archive" {
 			continue
 		}
 		var binding fdlWorkItemBinding
@@ -1655,7 +1703,29 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 	if err != nil {
 		return nil, err
 	}
+	payload, err := d.readFDLDispatchPayload(runID, binding.WorkItemID)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{"complete-work-item", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--work-item-id", binding.WorkItemID, "--report", reportPath}
+	if payload.Attempt.Phase == "planning" || payload.Attempt.Phase == "design" {
+		contract, ok := meta["contract_index"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("FDL %s role metadata requires a contract_index object", payload.Attempt.Phase)
+		}
+		pack, err := d.fdlContextPack(runID, binding, payload, string(report), contract)
+		if err != nil {
+			return nil, err
+		}
+		path := filepath.Join(itemDir, "submission-context_pack.json")
+		if err := writeFDLExecutorJSON(path, pack); err != nil {
+			return nil, err
+		}
+		args = append(args, "--context-pack", path)
+		// This artifact binds private Controller evidence. Never accept an
+		// Agent-authored substitute for it.
+		delete(meta, "context_pack")
+	}
 	for _, field := range []string{"contract_index", "context_pack", "findings", "blockers", "failure"} {
 		if value, ok := meta[field]; ok {
 			path := filepath.Join(itemDir, "submission-"+field+".json")
@@ -1695,6 +1765,75 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 		return nil, fmt.Errorf("decode complete-work-item result: %w", err)
 	}
 	return event, nil
+}
+
+func (d *Daemon) fdlContextPack(runID string, binding fdlWorkItemBinding, payload fdlDispatchPayload, report string, contract map[string]any) (map[string]any, error) {
+	if payload.Attempt.AttemptID == "" || payload.Attempt.ControlManifestHash == "" {
+		return nil, fmt.Errorf("FDL planning dispatch has incomplete private identity")
+	}
+	taskBriefHash, err := fdlTaskBriefHash(filepath.Join(d.cfg.FDLRunRoot, runID, "state.json"))
+	if err != nil {
+		return nil, err
+	}
+	artifactKind := "design"
+	if payload.Attempt.Phase == "planning" {
+		artifactKind = "delivery_plan"
+	}
+	artifactHash, err := fdlValueDigest(map[string]any{"kind": artifactKind, "media_type": "text/markdown", "content": report})
+	if err != nil {
+		return nil, err
+	}
+	contractHash, err := fdlValueDigest(contract)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"schema_version": 1,
+		"artifact_kind":  "context_pack",
+		"producer":       map[string]any{"phase": payload.Attempt.Phase, "attempt_id": payload.Attempt.AttemptID, "dispatch_hash": binding.DispatchSHA256},
+		"bindings": map[string]any{
+			"task_brief_hash":       taskBriefHash,
+			"design_or_plan_hash":   artifactHash,
+			"contract_index_hash":   contractHash,
+			"control_manifest_hash": payload.Attempt.ControlManifestHash,
+		},
+		"code_map":             []any{},
+		"invariants":           []any{},
+		"decisions":            []any{},
+		"rejected_options":     []any{},
+		"open_risks":           []any{},
+		"acceptance_test_map":  []any{},
+		"exploration_evidence": []any{},
+	}, nil
+}
+
+func fdlTaskBriefHash(statePath string) (any, error) {
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("read FDL Controller state for Context Pack: %w", err)
+	}
+	var state struct {
+		Roots map[string]struct {
+			Artifact struct {
+				SHA256 string `json:"sha256"`
+			} `json:"artifact"`
+		} `json:"roots"`
+	}
+	if json.Unmarshal(data, &state) != nil {
+		return nil, fmt.Errorf("decode FDL Controller state for Context Pack")
+	}
+	if taskBrief, ok := state.Roots["task_brief"]; ok && taskBrief.Artifact.SHA256 != "" {
+		return taskBrief.Artifact.SHA256, nil
+	}
+	return nil, nil
+}
+
+func fdlValueDigest(value any) (string, error) {
+	encoded, err := canonicalFDLJSON(value)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(encoded)), nil
 }
 
 func readFDLRoleMeta(path string) (map[string]any, error) {
@@ -1756,11 +1895,33 @@ func (d *Daemon) materializeFDLDispatch(runID string, mailbox *fdlExecutorMailbo
 		if found, err := readFDLExecutorJSON(bindingPath, &existing); err != nil {
 			return nil, err
 		} else if found {
-			if existing.FDLRunID != envelope.RunID || existing.ActionID != envelope.NextAction.ActionID || existing.WorkItemID != item.WorkItemID || existing.SubmissionToken != item.SubmissionToken {
+			if existing.FDLRunID == envelope.RunID && existing.ActionID == envelope.NextAction.ActionID && existing.WorkItemID == item.WorkItemID && existing.SubmissionToken == item.SubmissionToken {
+				bindings = append(bindings, existing)
+				continue
+			}
+			// A recovery retry gets a new Controller action and submission token,
+			// while its logical work_item_id may remain the same. Preserve the
+			// terminal binding under an action-scoped archive before creating the
+			// replacement; reusing the path would bind the new token to old work.
+			if !fdlBindingCanBeArchived(existing) {
 				return nil, fmt.Errorf("existing FDL work-item binding conflicts with current action")
 			}
-			bindings = append(bindings, existing)
-			continue
+			archiveID := fmt.Sprintf("%x", sha256.Sum256([]byte(existing.ActionID)))
+			archiveDir := filepath.Join(stateDir, "work-items", "archive", archiveID, item.WorkItemID)
+			if err := os.MkdirAll(filepath.Dir(archiveDir), 0o700); err != nil {
+				return nil, fmt.Errorf("create archived FDL work-item directory: %w", err)
+			}
+			if _, err := os.Stat(archiveDir); err == nil {
+				return nil, fmt.Errorf("archived FDL work-item binding already exists")
+			} else if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("inspect archived FDL work-item binding: %w", err)
+			}
+			if err := os.Rename(itemDir, archiveDir); err != nil {
+				return nil, fmt.Errorf("archive superseded FDL work-item binding: %w", err)
+			}
+			if err := os.MkdirAll(itemDir, 0o700); err != nil {
+				return nil, fmt.Errorf("create replacement FDL work-item directory: %w", err)
+			}
 		}
 		if err := os.WriteFile(filepath.Join(itemDir, "dispatch.json"), dispatch, 0o400); err != nil {
 			return nil, err
@@ -1786,6 +1947,13 @@ func (d *Daemon) materializeFDLDispatch(runID string, mailbox *fdlExecutorMailbo
 	}
 	sort.Slice(bindings, func(i, j int) bool { return bindings[i].WorkItemID < bindings[j].WorkItemID })
 	return bindings, nil
+}
+
+// fdlBindingCanBeArchived admits only work the Controller has already
+// terminally consumed. A dispatch_failed binding reaches that state through
+// the batch acknowledgement, even though it never has an Agent result.
+func fdlBindingCanBeArchived(binding fdlWorkItemBinding) bool {
+	return binding.TerminalSubmitted || binding.State == "dispatch_failed"
 }
 
 func fdlRunFilePath(runRoot, referencePath string) (string, error) {

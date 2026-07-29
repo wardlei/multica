@@ -207,23 +207,38 @@ func TestFDLMailboxRecoveryParsesOnlyCurrentAction(t *testing.T) {
 
 func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testing.T) {
 	completed := false
+	projected := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/daemon/fdl-runs/local-run/decisions/decision-1/complete" {
+		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		var request struct {
-			OperationID string `json:"operation_id"`
+		switch r.URL.Path {
+		case "/api/daemon/fdl-runs/local-run/decisions/decision-1/complete":
+			var request struct {
+				OperationID string `json:"operation_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode completion request: %v", err)
+			}
+			if request.OperationID != "recovery-op" {
+				t.Fatalf("completion operation = %q, want recovery-op", request.OperationID)
+			}
+			if runtimeID := r.Header.Get(fdlRuntimeHeader); runtimeID != "runtime-1" {
+				t.Fatalf("FDL runtime identity = %q, want runtime-1", runtimeID)
+			}
+			completed = true
+		case "/api/daemon/fdl-runs/local-run/projection":
+			var projection FDLProjection
+			if err := json.NewDecoder(r.Body).Decode(&projection); err != nil {
+				t.Fatalf("decode recovery projection: %v", err)
+			}
+			if projection.Status != "running" || projection.Phase != "design" || projection.ActionType != "dispatch_planning_role" {
+				t.Fatalf("recovery projection = %#v", projection)
+			}
+			projected = true
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode completion request: %v", err)
-		}
-		if request.OperationID != "recovery-op" {
-			t.Fatalf("completion operation = %q, want recovery-op", request.OperationID)
-		}
-		if runtimeID := r.Header.Get(fdlRuntimeHeader); runtimeID != "runtime-1" {
-			t.Fatalf("FDL runtime identity = %q, want runtime-1", runtimeID)
-		}
-		completed = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -237,7 +252,7 @@ func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testi
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("create executor state: %v", err)
 	}
-	returnedEnvelope := json.RawMessage(`{"run_id":"controller-run","next_action":{"action_id":"next-action","kind":"await_external_results"}}`)
+	returnedEnvelope := json.RawMessage(`{"run_id":"controller-run","state":{"phase":"planning"},"next_action":{"action_id":"next-action","kind":"dispatch_planning_role"}}`)
 	receipt := fdlRecoveryReceipt{
 		SchemaVersion: 1, DecisionID: "decision-1", FDLRunID: "controller-run", ActionID: "recover-action",
 		ExternalWorkID: "private-work", WorkItemID: "private-item", SubmissionToken: "private-token",
@@ -257,6 +272,9 @@ func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testi
 	if !completed {
 		t.Fatal("expected daemon to complete the already accepted recovery decision")
 	}
+	if !projected {
+		t.Fatal("expected daemon to restore the running projection before redispatch")
+	}
 	if _, err := os.Stat(d.recoveryReceiptPath("local-run")); !os.IsNotExist(err) {
 		t.Fatalf("recovery receipt still exists after finalization: %v", err)
 	}
@@ -264,7 +282,35 @@ func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testi
 	if err != nil {
 		t.Fatalf("read advanced mailbox: %v", err)
 	}
-	if next == nil || next.ActionID != "next-action" || next.ActionKind != "await_external_results" {
+	if next == nil || next.ActionID != "next-action" || next.ActionKind != "dispatch_planning_role" {
 		t.Fatalf("mailbox was not advanced to Controller reply: %#v", next)
+	}
+}
+
+func TestFDLRunningProjectionForDispatchIgnoresNonDispatchReplies(t *testing.T) {
+	projection, dispatch, err := fdlRunningProjectionForDispatch(json.RawMessage(`{"state":{"phase":"review"},"next_action":{"kind":"handoff_external"}}`))
+	if err != nil || dispatch || projection.Status != "" {
+		t.Fatalf("handoff reply projection = (%#v, %v, %v)", projection, dispatch, err)
+	}
+}
+
+func TestFDLBindingArchiveEligibilityRequiresControllerTerminalState(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding fdlWorkItemBinding
+		want    bool
+	}{
+		{name: "submitted result", binding: fdlWorkItemBinding{State: "terminal_submitted", TerminalSubmitted: true}, want: true},
+		{name: "acknowledged dispatch failure", binding: fdlWorkItemBinding{State: "dispatch_failed"}, want: true},
+		{name: "prepared", binding: fdlWorkItemBinding{State: "prepared"}, want: false},
+		{name: "pending acknowledgement", binding: fdlWorkItemBinding{State: "pending_ack"}, want: false},
+		{name: "activated", binding: fdlWorkItemBinding{State: "activated"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fdlBindingCanBeArchived(tt.binding); got != tt.want {
+				t.Fatalf("fdlBindingCanBeArchived(%#v) = %v, want %v", tt.binding, got, tt.want)
+			}
+		})
 	}
 }

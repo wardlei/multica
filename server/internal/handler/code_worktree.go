@@ -166,17 +166,11 @@ func (h *Handler) CreateCodeWorktreeInspection(w http.ResponseWriter, r *http.Re
 }
 
 func (h *Handler) CompleteCodeWorktreeInspection(w http.ResponseWriter, r *http.Request) {
-	wsID := middleware.DaemonWorkspaceIDFromContext(r.Context())
-	daemonID := middleware.DaemonIDFromContext(r.Context())
-	if wsID == "" || daemonID == "" {
-		writeError(w, 401, "daemon authentication required")
-		return
-	}
-	wsUUID, ok := parseUUIDOrBadRequest(w, wsID, "workspace_id")
+	id, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "inspection_id")
 	if !ok {
 		return
 	}
-	id, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "inspection_id")
+	wsUUID, daemonID, ok := h.codeWorktreeInspectionIdentity(w, r, id)
 	if !ok {
 		return
 	}
@@ -196,6 +190,63 @@ func (h *Handler) CompleteCodeWorktreeInspection(w http.ResponseWriter, r *http.
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": uuidToString(row.ID), "status": row.Status})
+}
+
+// codeWorktreeInspectionIdentity keeps the legacy mdt_ path while allowing
+// registered local daemons that authenticate with their owner's PAT to finish
+// an inspection. A PAT caller must own both the inspection and a runtime on
+// its requested daemon, so a workspace member cannot publish Git facts for
+// another member's machine.
+func (h *Handler) codeWorktreeInspectionIdentity(w http.ResponseWriter, r *http.Request, inspectionID pgtype.UUID) (pgtype.UUID, string, bool) {
+	workspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context())
+	daemonID := middleware.DaemonIDFromContext(r.Context())
+	if workspaceID != "" && daemonID != "" {
+		wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+		if !ok {
+			return pgtype.UUID{}, "", false
+		}
+		return wsUUID, daemonID, true
+	}
+
+	inspection, err := h.Queries.GetCodeWorktreeInspection(r.Context(), inspectionID)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "code worktree inspection not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "load code worktree inspection failed")
+		}
+		return pgtype.UUID{}, "", false
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return pgtype.UUID{}, "", false
+	}
+	userUUID, ok := parseUUIDOrBadRequest(w, userID, "user_id")
+	if !ok {
+		return pgtype.UUID{}, "", false
+	}
+	if inspection.CreatedBy != userUUID {
+		writeError(w, http.StatusForbidden, "only the inspection owner can complete it")
+		return pgtype.UUID{}, "", false
+	}
+	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(inspection.WorkspaceID)) {
+		return pgtype.UUID{}, "", false
+	}
+	runtimes, err := h.Queries.ListAgentRuntimesByOwner(r.Context(), db.ListAgentRuntimesByOwnerParams{
+		WorkspaceID: inspection.WorkspaceID,
+		OwnerID:     userUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load daemon runtimes failed")
+		return pgtype.UUID{}, "", false
+	}
+	for _, runtime := range runtimes {
+		if runtime.DaemonID.Valid && runtime.DaemonID.String == inspection.DaemonID {
+			return inspection.WorkspaceID, inspection.DaemonID, true
+		}
+	}
+	writeError(w, http.StatusForbidden, "daemon is not owned by the inspection owner")
+	return pgtype.UUID{}, "", false
 }
 
 func (h *Handler) GetCodeWorktreeInspection(w http.ResponseWriter, r *http.Request) {

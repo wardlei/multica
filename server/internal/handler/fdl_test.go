@@ -440,6 +440,17 @@ func TestDaemonFDLRunLifecycleIsWorktreeBoundAndSnapshotsIssue(t *testing.T) {
 		t.Fatalf("direct FDL task stored an invalid daemon worktree contract: %#v", worktree)
 	}
 
+	// context is JSONB, so PostgreSQL is free to normalize its whitespace.
+	// Activation must parse the direct-task marker rather than matching a raw
+	// JSON string, otherwise a pending task cannot cross the acknowledgement
+	// boundary in a real database.
+	activateRecorder := httptest.NewRecorder()
+	activateRequest := withURLParams(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/tasks/"+taskID+"/activate", nil).WithContext(daemonContext), "id", pending.Runs[0].ID, "taskId", taskID)
+	testHandler.ActivateFDLAgentTaskForDaemon(activateRecorder, activateRequest)
+	if activateRecorder.Code != http.StatusOK {
+		t.Fatalf("ActivateFDLAgentTaskForDaemon: expected 200, got %d: %s", activateRecorder.Code, activateRecorder.Body.String())
+	}
+
 	// An FDL cancellation differs deliberately from ordinary Squad Issue
 	// cancellation: even a pre-ack direct task must be made terminal before
 	// the daemon receives the Controller termination request.

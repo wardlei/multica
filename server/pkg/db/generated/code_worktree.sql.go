@@ -245,6 +245,35 @@ func (q *Queries) GetCodeWorktreeInWorkspace(ctx context.Context, arg GetCodeWor
 	return i, err
 }
 
+const getCodeWorktreeInspection = `-- name: GetCodeWorktreeInspection :one
+SELECT id, workspace_id, daemon_id, local_path, worktree_id, expected_updated_at, status, canonical_path, repository_url, branch, head_sha, is_dirty, error, expires_at, created_at, completed_at, created_by FROM code_worktree_inspection WHERE id=$1
+`
+
+func (q *Queries) GetCodeWorktreeInspection(ctx context.Context, id pgtype.UUID) (CodeWorktreeInspection, error) {
+	row := q.db.QueryRow(ctx, getCodeWorktreeInspection, id)
+	var i CodeWorktreeInspection
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.LocalPath,
+		&i.WorktreeID,
+		&i.ExpectedUpdatedAt,
+		&i.Status,
+		&i.CanonicalPath,
+		&i.RepositoryUrl,
+		&i.Branch,
+		&i.HeadSha,
+		&i.IsDirty,
+		&i.Error,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.CompletedAt,
+		&i.CreatedBy,
+	)
+	return i, err
+}
+
 const getCodeWorktreeInspectionInWorkspace = `-- name: GetCodeWorktreeInspectionInWorkspace :one
 SELECT id, workspace_id, daemon_id, local_path, worktree_id, expected_updated_at, status, canonical_path, repository_url, branch, head_sha, is_dirty, error, expires_at, created_at, completed_at, created_by FROM code_worktree_inspection WHERE id=$1 AND workspace_id=$2
 `

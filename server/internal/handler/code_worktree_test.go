@@ -101,3 +101,40 @@ func TestDeleteCodeWorktreeRejectsActiveTaskSnapshot(t *testing.T) {
 		t.Fatalf("DeleteCodeWorktree after task cancellation: got %d, want 204: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestCompleteCodeWorktreeInspectionAllowsOwnerPATForRegisteredDaemon(t *testing.T) {
+	ctx := context.Background()
+	const daemonID = "pat-inspection-daemon"
+	var runtimeID, inspectionID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, owner_id, last_seen_at)
+		VALUES ($1, $2, 'PAT inspection runtime', 'local', 'codex', 'online', 'test', '{}'::jsonb, $3, now())
+		RETURNING id
+	`, testWorkspaceID, daemonID, testUserID).Scan(&runtimeID); err != nil {
+		t.Fatalf("create fixture runtime: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO code_worktree_inspection (workspace_id, daemon_id, local_path, status, expires_at, created_by)
+		VALUES ($1, $2, '/tmp/multica-pat-inspection', 'pending', now() + interval '5 minutes', $3)
+		RETURNING id
+	`, testWorkspaceID, daemonID, testUserID).Scan(&inspectionID); err != nil {
+		t.Fatalf("create inspection: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM code_worktree_inspection WHERE id = $1`, inspectionID)
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest(http.MethodPost, "/api/daemon/code-worktree-inspections/"+inspectionID+"/complete", map[string]any{
+		"canonical_path": "/tmp/multica-pat-inspection",
+		"repository_url": "github.com/multica-ai/multica",
+		"branch":         "main",
+		"head_sha":       "0123456789012345678901234567890123456789",
+		"is_dirty":       false,
+	}), "id", inspectionID)
+	testHandler.CompleteCodeWorktreeInspection(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CompleteCodeWorktreeInspection PAT fallback: got %d: %s", w.Code, w.Body.String())
+	}
+}

@@ -144,7 +144,6 @@ func (h *Handler) CreateFDLAgentTaskForDaemon(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "create FDL agent task failed")
 		return
 	}
-	h.TaskService.NotifyTaskEnqueued(r.Context(), task)
 	writeJSON(w, http.StatusCreated, map[string]any{"task_id": uuidToString(task.ID), "status": task.Status})
 }
 
@@ -170,7 +169,7 @@ func (h *Handler) ActivateFDLAgentTaskForDaemon(w http.ResponseWriter, r *http.R
 		return
 	}
 	task, err := h.Queries.GetAgentTask(r.Context(), taskID)
-	if err != nil || task.IssueID != run.IssueID || !strings.Contains(string(task.Context), `"fdl_direct":true`) {
+	if err != nil || task.IssueID != run.IssueID || !service.IsFDLDirectTask(task) {
 		writeError(w, http.StatusNotFound, "FDL task is not pending for this run")
 		return
 	}
