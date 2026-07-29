@@ -750,7 +750,7 @@ The object must include schema_version=1 and request_id=%q, plus the requested e
 		contractInstruction = `
 For the compact delivery plan, meta.json must include a contract_index object with this exact shape:
 {"schema_version":1,"artifact_kind":"delivery_plan","acceptance_criteria":[{"key":"AC-...","statement":"...","supersedes":null}],"acceptance_refs":[],"invariants":[{"key":"INV-...","statement":"...","acceptance_keys":["AC-..."],"supersedes":null}]}
-Use stable AC-/INV- keys. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
+Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-001 are invalid. Do not put a context_pack in meta.json: the local executor binds its private Controller hashes.
 `
 	}
 	return fmt.Sprintf(`You are the frozen FDL delivery role %q.
