@@ -29,6 +29,8 @@ type daemonFDLIssueRunResponse struct {
 	IssueSnapshot    json.RawMessage `json:"issue_snapshot"`
 }
 
+const fdlRuntimeIdentityHeader = "X-Multica-FDL-Runtime-ID"
+
 func daemonFDLIssueRunToResponse(run db.FdlIssueRun) daemonFDLIssueRunResponse {
 	var fdlRunID *string
 	if run.FdlRunID.Valid {
@@ -52,15 +54,27 @@ func daemonFDLIssueRunToResponse(run db.FdlIssueRun) daemonFDLIssueRunResponse {
 func (h *Handler) daemonFDLIdentity(w http.ResponseWriter, r *http.Request) (pgtype.UUID, string, bool) {
 	workspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context())
 	daemonID := middleware.DaemonIDFromContext(r.Context())
-	if workspaceID == "" || daemonID == "" {
-		writeError(w, http.StatusUnauthorized, "daemon authentication required")
-		return pgtype.UUID{}, "", false
+	if workspaceID != "" && daemonID != "" {
+		wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+		if !ok {
+			return pgtype.UUID{}, "", false
+		}
+		return wsUUID, daemonID, true
 	}
-	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+
+	// Existing daemons authenticate with an owner PAT rather than an mdt_
+	// daemon token. A registered runtime lets that path prove both the owning
+	// daemon and workspace without trusting a caller-supplied daemon ID.
+	runtimeID := strings.TrimSpace(r.Header.Get(fdlRuntimeIdentityHeader))
+	runtime, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID)
 	if !ok {
 		return pgtype.UUID{}, "", false
 	}
-	return wsUUID, daemonID, true
+	if userID := requestUserID(r); userID == "" || !runtime.OwnerID.Valid || uuidToString(runtime.OwnerID) != userID || !runtime.DaemonID.Valid || strings.TrimSpace(runtime.DaemonID.String) == "" {
+		writeError(w, http.StatusNotFound, "FDL daemon runtime is unavailable")
+		return pgtype.UUID{}, "", false
+	}
+	return runtime.WorkspaceID, runtime.DaemonID.String, true
 }
 
 // ListPendingFDLIssueRunsForDaemon lets a daemon discover only runs whose

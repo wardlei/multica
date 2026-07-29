@@ -220,6 +220,9 @@ func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testi
 		if request.OperationID != "recovery-op" {
 			t.Fatalf("completion operation = %q, want recovery-op", request.OperationID)
 		}
+		if runtimeID := r.Header.Get(fdlRuntimeHeader); runtimeID != "runtime-1" {
+			t.Fatalf("FDL runtime identity = %q, want runtime-1", runtimeID)
+		}
 		completed = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -248,7 +251,7 @@ func TestFDLRecoverRecoveryReceiptFinalizesControllerAcceptedResolution(t *testi
 		Envelope: json.RawMessage(`{"run_id":"controller-run","next_action":{"action_id":"recover-action","kind":"recover_external_work"}}`),
 	}
 
-	if err := d.recoverFDLRecoveryReceipt(context.Background(), "local-run", mailbox); err != nil {
+	if err := d.recoverFDLRecoveryReceipt(context.Background(), "local-run", "runtime-1", mailbox); err != nil {
 		t.Fatalf("recover FDL recovery receipt: %v", err)
 	}
 	if !completed {

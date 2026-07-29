@@ -146,29 +146,53 @@ func (d *Daemon) fdlExecutorLoop(ctx context.Context) {
 }
 
 func (d *Daemon) runFDLExecutorCycle(ctx context.Context) {
-	runs, err := d.client.ListPendingFDLIssueRuns(ctx)
-	if err != nil {
-		d.logger.Warn("FDL pending run poll failed", "error", err)
-		return
-	}
-	for _, run := range runs {
-		if err := d.initializeFDLRun(ctx, run); err != nil {
-			d.logger.Warn("FDL run initialization failed", "fdl_issue_run_id", run.ID, "issue_id", run.IssueID, "error", err)
-			if reportErr := d.client.ReportFDLIssueRunRecovery(ctx, run.ID, "executor initialization failed: "+boundedFDLError(err)); reportErr != nil {
-				d.logger.Warn("FDL recovery projection failed", "fdl_issue_run_id", run.ID, "error", reportErr)
+	for _, runtimeID := range d.fdlExecutorRuntimeIDs() {
+		runs, err := d.client.ListPendingFDLIssueRuns(ctx, runtimeID)
+		if err != nil {
+			d.logger.Warn("FDL pending run poll failed", "runtime_id", runtimeID, "error", err)
+			continue
+		}
+		for _, run := range runs {
+			if err := d.initializeFDLRun(ctx, run); err != nil {
+				d.logger.Warn("FDL run initialization failed", "fdl_issue_run_id", run.ID, "issue_id", run.IssueID, "error", err)
+				if reportErr := d.client.ReportFDLIssueRunRecovery(ctx, run.FDLRuntimeID, run.ID, "executor initialization failed: "+boundedFDLError(err)); reportErr != nil {
+					d.logger.Warn("FDL recovery projection failed", "fdl_issue_run_id", run.ID, "error", reportErr)
+				}
+			}
+		}
+		active, err := d.client.ListActiveFDLIssueRuns(ctx, runtimeID)
+		if err != nil {
+			d.logger.Warn("FDL active run poll failed", "runtime_id", runtimeID, "error", err)
+			continue
+		}
+		for _, run := range active {
+			if err := d.refreshFDLMailbox(ctx, run); err != nil {
+				d.logger.Warn("FDL mailbox refresh failed", "fdl_issue_run_id", run.ID, "issue_id", run.IssueID, "error", err)
 			}
 		}
 	}
-	active, err := d.client.ListActiveFDLIssueRuns(ctx)
-	if err != nil {
-		d.logger.Warn("FDL active run poll failed", "error", err)
-		return
+}
+
+// fdlExecutorRuntimeIDs chooses one registered runtime per workspace. The
+// runtime authenticates FDL requests while the frozen worktree still selects
+// which daemon may receive an individual run.
+func (d *Daemon) fdlExecutorRuntimeIDs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	workspaceIDs := make([]string, 0, len(d.workspaces))
+	for workspaceID := range d.workspaces {
+		workspaceIDs = append(workspaceIDs, workspaceID)
 	}
-	for _, run := range active {
-		if err := d.refreshFDLMailbox(ctx, run); err != nil {
-			d.logger.Warn("FDL mailbox refresh failed", "fdl_issue_run_id", run.ID, "issue_id", run.IssueID, "error", err)
+	sort.Strings(workspaceIDs)
+	runtimeIDs := make([]string, 0, len(workspaceIDs))
+	for _, workspaceID := range workspaceIDs {
+		ids := append([]string(nil), d.workspaces[workspaceID].runtimeIDs...)
+		sort.Strings(ids)
+		if len(ids) > 0 {
+			runtimeIDs = append(runtimeIDs, ids[0])
 		}
 	}
+	return runtimeIDs
 }
 
 func (d *Daemon) initializeFDLRun(ctx context.Context, run PendingFDLIssueRun) error {
@@ -228,11 +252,11 @@ func (d *Daemon) initializeFDLRun(ctx context.Context, run PendingFDLIssueRun) e
 	if err := d.runFDLCommand(ctx, "preflight-run", "--run-root", runRoot); err != nil {
 		return err
 	}
-	if err := d.client.InitializeFDLIssueRun(ctx, run.ID, fdlRunID); err != nil {
+	if err := d.client.InitializeFDLIssueRun(ctx, run.FDLRuntimeID, run.ID, fdlRunID); err != nil {
 		return fmt.Errorf("bind initialized FDL run: %w", err)
 	}
 	return d.refreshFDLMailbox(ctx, PendingFDLIssueRun{
-		ID: run.ID, IssueID: run.IssueID, FDLRunID: &fdlRunID, Status: "running", Phase: "setup",
+		ID: run.ID, IssueID: run.IssueID, FDLRunID: &fdlRunID, Status: "running", Phase: "setup", FDLRuntimeID: run.FDLRuntimeID,
 	})
 }
 
@@ -241,7 +265,7 @@ func (d *Daemon) initializeFDLRun(ctx context.Context, run PendingFDLIssueRun) e
 // issue a second drive while an action is already durable in the mailbox.
 func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) error {
 	if run.Status == "cancelling" && (run.FDLRunID == nil || strings.TrimSpace(*run.FDLRunID) == "") {
-		return d.client.CancelFDLIssueRun(ctx, run.ID, "Issue cancelled before FDL Controller initialization")
+		return d.client.CancelFDLIssueRun(ctx, run.FDLRuntimeID, run.ID, "Issue cancelled before FDL Controller initialization")
 	}
 	if run.FDLRunID == nil || strings.TrimSpace(*run.FDLRunID) == "" {
 		return fmt.Errorf("active FDL run has no external run ID")
@@ -259,7 +283,7 @@ func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) 
 		if err != nil {
 			return err
 		}
-		if err := d.recoverFDLDispatchReceipt(ctx, run.ID, mailbox); err != nil {
+		if err := d.recoverFDLDispatchReceipt(ctx, run.ID, run.FDLRuntimeID, mailbox); err != nil {
 			return err
 		}
 		// Dispatch recovery can atomically replace the mailbox after the last
@@ -268,14 +292,14 @@ func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) 
 		if err != nil {
 			return err
 		}
-		if err := d.recoverFDLDecisionReceipt(ctx, run.ID, mailbox); err != nil {
+		if err := d.recoverFDLDecisionReceipt(ctx, run.ID, run.FDLRuntimeID, mailbox); err != nil {
 			return err
 		}
 		mailbox, err = readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
 		if err != nil {
 			return err
 		}
-		if err := d.recoverFDLRecoveryReceipt(ctx, run.ID, mailbox); err != nil {
+		if err := d.recoverFDLRecoveryReceipt(ctx, run.ID, run.FDLRuntimeID, mailbox); err != nil {
 			return err
 		}
 		// Decision recovery can advance the Controller action after its durable
@@ -336,14 +360,14 @@ func (d *Daemon) processFDLMailbox(ctx context.Context, run PendingFDLIssueRun, 
 		return d.projectFDLStop(ctx, run, mailbox)
 	}
 	if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
-		if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
+		if err := d.dispatchFDLMailbox(ctx, run.ID, run.FDLRuntimeID, mailbox); err != nil {
 			return err
 		}
 	}
 	if err := d.collectFDLTaskResults(ctx, run.ID, *run.FDLRunID); err != nil {
 		return err
 	}
-	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+	return d.client.UpdateFDLIssueRunProjection(ctx, run.FDLRuntimeID, run.ID, FDLProjection{
 		Status: "running", Phase: fdlProjectionPhase(run.Phase),
 		Summary: "Controller action is held by the local executor", ActionType: mailbox.ActionKind,
 	})
@@ -386,7 +410,7 @@ func (d *Daemon) terminateFDLRun(ctx context.Context, run PendingFDLIssueRun) er
 			return err
 		}
 	}
-	return d.client.CancelFDLIssueRun(ctx, run.ID, "Issue cancelled; Controller terminated and direct tasks cancelled")
+	return d.client.CancelFDLIssueRun(ctx, run.FDLRuntimeID, run.ID, "Issue cancelled; Controller terminated and direct tasks cancelled")
 }
 
 func (d *Daemon) readOrInitializeFDLRun(ctx context.Context, runRoot, configPath string) (string, error) {
@@ -571,15 +595,15 @@ type fdlDispatchPayload struct {
 // dispatchFDLMailbox is the durable bridge for one Controller dispatch action:
 // all local task rows are created before the one batch acknowledgement, and no
 // task becomes claimable before that acknowledgement is durably accepted.
-func (d *Daemon) dispatchFDLMailbox(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+func (d *Daemon) dispatchFDLMailbox(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
 	bindings, err := d.materializeFDLDispatch(runID, mailbox)
 	if err != nil {
 		return err
 	}
-	if err := d.createFDLDispatchTasks(ctx, runID, bindings); err != nil {
+	if err := d.createFDLDispatchTasks(ctx, runID, runtimeID, bindings); err != nil {
 		return err
 	}
-	return d.acknowledgeAndActivateFDLDispatch(ctx, runID, mailbox)
+	return d.acknowledgeAndActivateFDLDispatch(ctx, runID, runtimeID, mailbox)
 }
 
 func (d *Daemon) fdlBindingPath(runID, workItemID string) string {
@@ -633,7 +657,7 @@ func fdlProfileRole(payload fdlDispatchPayload) (string, error) {
 	}
 }
 
-func (d *Daemon) createFDLDispatchTasks(ctx context.Context, runID string, bindings []fdlWorkItemBinding) error {
+func (d *Daemon) createFDLDispatchTasks(ctx context.Context, runID, runtimeID string, bindings []fdlWorkItemBinding) error {
 	for _, binding := range bindings {
 		if binding.State == "dispatch_failed" || binding.TaskID != "" {
 			continue
@@ -667,7 +691,7 @@ func (d *Daemon) createFDLDispatchTasks(ctx context.Context, runID string, bindi
 			}
 			continue
 		}
-		taskID, err := d.client.CreateFDLAgentTask(ctx, runID, role, instructions, binding.DispatchKey, 0, executionWorkspace)
+		taskID, err := d.client.CreateFDLAgentTask(ctx, runtimeID, runID, role, instructions, binding.DispatchKey, 0, executionWorkspace)
 		if err != nil {
 			// A rejected frozen runtime/role cannot become valid through a blind
 			// retry. Report it as a declared dispatch failure; transport errors
@@ -732,7 +756,7 @@ Optionally write JSON metadata to %s with only outcome (completed|blocked|failed
 `, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json")), nil
 }
 
-func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
 	stateDir := d.fdlExecutorStateDir(runID)
 	receiptPath := filepath.Join(stateDir, "dispatch-receipt.json")
 	receipt, err := d.loadOrCreateFDLDispatchReceipt(runID, mailbox)
@@ -758,7 +782,7 @@ func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID st
 			return err
 		}
 	}
-	if err := d.activateFDLDispatchTasks(ctx, runID, receipt); err != nil {
+	if err := d.activateFDLDispatchTasks(ctx, runID, runtimeID, receipt); err != nil {
 		return err
 	}
 	if err := writeFDLExecutorJSON(filepath.Join(stateDir, "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
@@ -855,7 +879,7 @@ func (d *Daemon) fdlAcknowledgementEvent(receipt *fdlDispatchReceipt) map[string
 	}
 }
 
-func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID string, receipt *fdlDispatchReceipt) error {
+func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID, runtimeID string, receipt *fdlDispatchReceipt) error {
 	workItemIDs := make([]string, 0, len(receipt.TaskIDs))
 	for workItemID := range receipt.TaskIDs {
 		workItemIDs = append(workItemIDs, workItemID)
@@ -865,7 +889,7 @@ func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID string, rec
 		if receipt.Activated[workItemID] {
 			continue
 		}
-		if err := d.client.ActivateFDLAgentTask(ctx, runID, receipt.TaskIDs[workItemID]); err != nil {
+		if err := d.client.ActivateFDLAgentTask(ctx, runtimeID, runID, receipt.TaskIDs[workItemID]); err != nil {
 			return fmt.Errorf("activate FDL task for %s: %w", workItemID, err)
 		}
 		var binding fdlWorkItemBinding
@@ -891,7 +915,7 @@ func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID string, rec
 // recoverFDLDispatchReceipt finishes only work whose Controller acknowledgement
 // is already durable. It must run before reading a mailbox action so an old
 // dispatch can never be driven a second time after a daemon crash.
-func (d *Daemon) recoverFDLDispatchReceipt(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+func (d *Daemon) recoverFDLDispatchReceipt(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
 	path := filepath.Join(d.fdlExecutorStateDir(runID), "dispatch-receipt.json")
 	var receipt fdlDispatchReceipt
 	found, err := readFDLExecutorJSON(path, &receipt)
@@ -917,7 +941,7 @@ func (d *Daemon) recoverFDLDispatchReceipt(ctx context.Context, runID string, ma
 	if mailbox == nil || validateFDLDispatchReceipt(receipt, mailbox) != nil {
 		return fmt.Errorf("acknowledged FDL dispatch receipt conflicts with mailbox")
 	}
-	if err := d.activateFDLDispatchTasks(ctx, runID, &receipt); err != nil {
+	if err := d.activateFDLDispatchTasks(ctx, runID, runtimeID, &receipt); err != nil {
 		return err
 	}
 	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), returned); err != nil {
@@ -1019,14 +1043,14 @@ func (d *Daemon) processFDLHumanDecision(ctx context.Context, run PendingFDLIssu
 	if !ok {
 		return fmt.Errorf("unsupported FDL human decision kind %q", action.Kind)
 	}
-	if err := d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+	if err := d.client.UpdateFDLIssueRunProjection(ctx, run.FDLRuntimeID, run.ID, FDLProjection{
 		Status: "awaiting_human_decision", Phase: fdlDecisionPhase(action.Kind, action.Phase),
 		WaitingReason: "A structured FDL decision is required", ActionType: mailbox.ActionKind,
 		DecisionActionID: mailbox.ActionID, DecisionKind: action.Kind, AllowedDecisions: choices,
 	}); err != nil {
 		return err
 	}
-	decision, err := d.client.GetFDLHumanDecision(ctx, run.ID, mailbox.ActionID)
+	decision, err := d.client.GetFDLHumanDecision(ctx, run.FDLRuntimeID, run.ID, mailbox.ActionID)
 	if err != nil {
 		var requestErr *requestError
 		if errors.As(err, &requestErr) && requestErr.StatusCode == 404 {
@@ -1037,7 +1061,7 @@ func (d *Daemon) processFDLHumanDecision(ctx context.Context, run PendingFDLIssu
 	if decision.ActionID != mailbox.ActionID || !fdlDecisionAllowed(choices, decision.Decision) {
 		return fmt.Errorf("FDL human decision does not match current Controller action")
 	}
-	return d.submitFDLHumanDecision(ctx, run.ID, mailbox, decision)
+	return d.submitFDLHumanDecision(ctx, run.FDLRuntimeID, run.ID, mailbox, decision)
 }
 
 type fdlRecoveryAction struct {
@@ -1085,14 +1109,14 @@ func (d *Daemon) processFDLExternalRecovery(ctx context.Context, run PendingFDLI
 	if err != nil {
 		return err
 	}
-	if err := d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+	if err := d.client.UpdateFDLIssueRunProjection(ctx, run.FDLRuntimeID, run.ID, FDLProjection{
 		Status: "recovering", Phase: fdlProjectionPhase(payload.Attempt.Phase),
 		WaitingReason: "A failed FDL work item requires an explicit retry or cancellation", ActionType: mailbox.ActionKind,
 		DecisionActionID: mailbox.ActionID, DecisionKind: "external_work_recovery", AllowedDecisions: []string{"retry", "cancel"},
 	}); err != nil {
 		return err
 	}
-	decision, err := d.client.GetFDLHumanDecision(ctx, run.ID, mailbox.ActionID)
+	decision, err := d.client.GetFDLHumanDecision(ctx, run.FDLRuntimeID, run.ID, mailbox.ActionID)
 	if err != nil {
 		var requestErr *requestError
 		if errors.As(err, &requestErr) && requestErr.StatusCode == 404 {
@@ -1103,10 +1127,10 @@ func (d *Daemon) processFDLExternalRecovery(ctx context.Context, run PendingFDLI
 	if decision.ActionID != mailbox.ActionID || (decision.Decision != "retry" && decision.Decision != "cancel") {
 		return fmt.Errorf("FDL recovery resolution does not match current Controller action")
 	}
-	return d.submitFDLRecoveryResolution(ctx, run.ID, mailbox, binding, decision)
+	return d.submitFDLRecoveryResolution(ctx, run.FDLRuntimeID, run.ID, mailbox, binding, decision)
 }
 
-func (d *Daemon) submitFDLRecoveryResolution(ctx context.Context, runID string, mailbox *fdlExecutorMailbox, binding fdlWorkItemBinding, decision FDLHumanDecision) error {
+func (d *Daemon) submitFDLRecoveryResolution(ctx context.Context, runtimeID, runID string, mailbox *fdlExecutorMailbox, binding fdlWorkItemBinding, decision FDLHumanDecision) error {
 	receiptPath := d.recoveryReceiptPath(runID)
 	var receipt fdlRecoveryReceipt
 	found, err := readFDLExecutorJSON(receiptPath, &receipt)
@@ -1123,7 +1147,7 @@ func (d *Daemon) submitFDLRecoveryResolution(ctx context.Context, runID string, 
 			if err != nil {
 				return err
 			}
-			decision, err = d.client.ClaimFDLHumanDecision(ctx, runID, decision.ID, operationID)
+			decision, err = d.client.ClaimFDLHumanDecision(ctx, runtimeID, runID, decision.ID, operationID)
 			if err != nil {
 				return fmt.Errorf("claim FDL recovery resolution: %w", err)
 			}
@@ -1168,10 +1192,10 @@ func (d *Daemon) submitFDLRecoveryResolution(ctx context.Context, runID string, 
 			return err
 		}
 	}
-	return d.finalizeFDLRecoveryReceipt(ctx, runID, receipt)
+	return d.finalizeFDLRecoveryReceipt(ctx, runtimeID, runID, receipt)
 }
 
-func (d *Daemon) recoverFDLRecoveryReceipt(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+func (d *Daemon) recoverFDLRecoveryReceipt(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
 	var receipt fdlRecoveryReceipt
 	found, err := readFDLExecutorJSON(d.recoveryReceiptPath(runID), &receipt)
 	if err != nil || !found {
@@ -1193,11 +1217,11 @@ func (d *Daemon) recoverFDLRecoveryReceipt(ctx context.Context, runID string, ma
 	if mailbox != nil && mailbox.ActionID != receipt.ActionID && mailbox.ActionID != returned.ActionID {
 		return fmt.Errorf("submitted FDL recovery receipt conflicts with mailbox")
 	}
-	return d.finalizeFDLRecoveryReceipt(ctx, runID, receipt)
+	return d.finalizeFDLRecoveryReceipt(ctx, runtimeID, runID, receipt)
 }
 
-func (d *Daemon) finalizeFDLRecoveryReceipt(ctx context.Context, runID string, receipt fdlRecoveryReceipt) error {
-	if err := d.client.CompleteFDLHumanDecision(ctx, runID, receipt.DecisionID, receipt.OperationID); err != nil {
+func (d *Daemon) finalizeFDLRecoveryReceipt(ctx context.Context, runtimeID, runID string, receipt fdlRecoveryReceipt) error {
+	if err := d.client.CompleteFDLHumanDecision(ctx, runtimeID, runID, receipt.DecisionID, receipt.OperationID); err != nil {
 		return fmt.Errorf("complete FDL recovery resolution: %w", err)
 	}
 	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
@@ -1221,7 +1245,7 @@ func fdlDecisionAllowed(choices []string, decision string) bool {
 	return false
 }
 
-func (d *Daemon) submitFDLHumanDecision(ctx context.Context, runID string, mailbox *fdlExecutorMailbox, decision FDLHumanDecision) error {
+func (d *Daemon) submitFDLHumanDecision(ctx context.Context, runtimeID, runID string, mailbox *fdlExecutorMailbox, decision FDLHumanDecision) error {
 	receiptPath := d.decisionReceiptPath(runID)
 	var receipt fdlDecisionReceipt
 	found, err := readFDLExecutorJSON(receiptPath, &receipt)
@@ -1239,7 +1263,7 @@ func (d *Daemon) submitFDLHumanDecision(ctx context.Context, runID string, mailb
 			if err != nil {
 				return err
 			}
-			decision, err = d.client.ClaimFDLHumanDecision(ctx, runID, decision.ID, operationID)
+			decision, err = d.client.ClaimFDLHumanDecision(ctx, runtimeID, runID, decision.ID, operationID)
 			if err != nil {
 				return fmt.Errorf("claim FDL human decision: %w", err)
 			}
@@ -1278,10 +1302,10 @@ func (d *Daemon) submitFDLHumanDecision(ctx context.Context, runID string, mailb
 			return err
 		}
 	}
-	return d.finalizeFDLDecisionReceipt(ctx, runID, receipt)
+	return d.finalizeFDLDecisionReceipt(ctx, runtimeID, runID, receipt)
 }
 
-func (d *Daemon) recoverFDLDecisionReceipt(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+func (d *Daemon) recoverFDLDecisionReceipt(ctx context.Context, runID, runtimeID string, mailbox *fdlExecutorMailbox) error {
 	var receipt fdlDecisionReceipt
 	found, err := readFDLExecutorJSON(d.decisionReceiptPath(runID), &receipt)
 	if err != nil || !found {
@@ -1303,11 +1327,11 @@ func (d *Daemon) recoverFDLDecisionReceipt(ctx context.Context, runID string, ma
 	if mailbox != nil && mailbox.ActionID != receipt.ActionID && mailbox.ActionID != returned.ActionID {
 		return fmt.Errorf("submitted FDL decision receipt conflicts with mailbox")
 	}
-	return d.finalizeFDLDecisionReceipt(ctx, runID, receipt)
+	return d.finalizeFDLDecisionReceipt(ctx, runtimeID, runID, receipt)
 }
 
-func (d *Daemon) finalizeFDLDecisionReceipt(ctx context.Context, runID string, receipt fdlDecisionReceipt) error {
-	if err := d.client.CompleteFDLHumanDecision(ctx, runID, receipt.DecisionID, receipt.OperationID); err != nil {
+func (d *Daemon) finalizeFDLDecisionReceipt(ctx context.Context, runtimeID, runID string, receipt fdlDecisionReceipt) error {
+	if err := d.client.CompleteFDLHumanDecision(ctx, runtimeID, runID, receipt.DecisionID, receipt.OperationID); err != nil {
 		return fmt.Errorf("complete FDL human decision: %w", err)
 	}
 	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
@@ -1367,7 +1391,7 @@ func (d *Daemon) processFDLHandoff(ctx context.Context, run PendingFDLIssueRun, 
 			return err
 		}
 	}
-	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+	return d.client.UpdateFDLIssueRunProjection(ctx, run.FDLRuntimeID, run.ID, FDLProjection{
 		Status: "handoff_ready", Phase: "handoff", Summary: "FDL run is verified and ready for an independent Git workflow.", ActionType: "handoff_external",
 	})
 }
@@ -1391,7 +1415,7 @@ func (d *Daemon) projectFDLStop(ctx context.Context, run PendingFDLIssueRun, mai
 	if envelope.State.Status == "cancelled" {
 		phase = "cancelled"
 	}
-	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+	return d.client.UpdateFDLIssueRunProjection(ctx, run.FDLRuntimeID, run.ID, FDLProjection{
 		Status: envelope.State.Status, Phase: phase, Summary: "FDL Controller stopped the delivery run.", ActionType: "stop",
 	})
 }

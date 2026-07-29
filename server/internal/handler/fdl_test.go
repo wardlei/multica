@@ -253,6 +253,14 @@ func TestDaemonFDLRunLifecycleIsWorktreeBoundAndSnapshotsIssue(t *testing.T) {
 	if len(pending.Runs) != 1 || pending.Runs[0].IssueID != issue.ID {
 		t.Fatalf("pending FDL runs = %#v, want only issue %s", pending.Runs, issue.ID)
 	}
+	patListRequest := httptest.NewRequest(http.MethodGet, "/api/daemon/fdl-runs/pending", nil)
+	patListRequest.Header.Set("X-User-ID", testUserID)
+	patListRequest.Header.Set(fdlRuntimeIdentityHeader, fixture.runtimeID)
+	patListRecorder := httptest.NewRecorder()
+	testHandler.ListPendingFDLIssueRunsForDaemon(patListRecorder, patListRequest)
+	if patListRecorder.Code != http.StatusOK {
+		t.Fatalf("PAT ListPendingFDLIssueRunsForDaemon: expected 200, got %d: %s", patListRecorder.Code, patListRecorder.Body.String())
+	}
 	if !containsAny(string(pending.Runs[0].IssueSnapshot), description) {
 		t.Fatalf("daemon launch payload omitted frozen Issue description: %s", pending.Runs[0].IssueSnapshot)
 	}
@@ -476,6 +484,7 @@ func containsAny(value string, needles ...string) bool {
 type fdlDeliveryFixture struct {
 	projectID    string
 	squadID      string
+	runtimeID    string
 	roleBindings []map[string]string
 	cleanupIDs   []string
 }
@@ -492,6 +501,7 @@ func createFDLDeliveryFixture(t *testing.T, ctx context.Context) fdlDeliveryFixt
 	`, testWorkspaceID, daemonID, testUserID).Scan(&runtimeID); err != nil {
 		t.Fatalf("create FDL runtime: %v", err)
 	}
+	fixture.runtimeID = runtimeID
 	fixture.cleanupIDs = append(fixture.cleanupIDs, runtimeID)
 
 	roles := []string{"intake", "planner", "implementer", "reviewer:correctness", "reviewer:regression", "reviewer:specialist", "explorer:impact_analysis"}
