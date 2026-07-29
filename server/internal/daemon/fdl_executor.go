@@ -792,7 +792,7 @@ Work only in your assigned task workspace and within the frozen change rules. Do
 
 Write the role report in Markdown to:
 %s
-Write JSON metadata to %s only when required above or when you need to report a non-default outcome. It may contain only outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested), findings, or finding_resolutions. All other roles must omit those review-only fields; place ordinary observations in the Markdown report and use blockers only when the work is blocked. Do not include identifiers copied from FDL state; the local executor binds them.
+Write JSON metadata to %s only when required above or when you need to report a non-default outcome. Planning is the only role that may set contract_index or context_pack; every other role must omit both. It may otherwise contain outcome (completed|blocked|failed), evidence_consistency (checked|not_applicable|conflict_found), blockers, and failure. Only a Reviewer may additionally set decision (accepted|changes_requested), findings, or finding_resolutions. All other roles must omit those review-only fields; place ordinary observations in the Markdown report and use blockers only when the work is blocked. Do not include identifiers copied from FDL state; the local executor binds them.
 
 %s
 %s
@@ -1802,6 +1802,12 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 		// This artifact binds private Controller evidence. Never accept an
 		// Agent-authored substitute for it.
 		delete(meta, "context_pack")
+	} else {
+		// Context Pack and formal contracts are Controller-owned planning
+		// evidence. Ignore incidental Agent metadata outside planning so it
+		// cannot invalidate an otherwise valid implementation or review result.
+		delete(meta, "context_pack")
+		delete(meta, "contract_index")
 	}
 	for _, field := range []string{"contract_index", "context_pack", "findings", "finding_resolutions", "blockers", "failure"} {
 		if value, ok := meta[field]; ok {

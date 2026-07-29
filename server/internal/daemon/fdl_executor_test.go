@@ -134,6 +134,23 @@ func TestFDLAgentInstructionsRequireConsistencyForContextPackConsumers(t *testin
 	}
 }
 
+func TestFDLAgentInstructionsReserveContextPackForPlanning(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"title":"Review","description":"Review the frozen snapshot.","priority":"normal"}`)); err != nil {
+		t.Fatal(err)
+	}
+	payload := fdlDispatchPayload{Instructions: json.RawMessage(`{"lane":"correctness"}`)}
+	payload.Attempt.Role = "feature-delivery-reviewer"
+	payload.Attempt.Phase = "review"
+	instructions, err := d.fdlAgentInstructions("run", fdlWorkItemBinding{WorkItemID: "correctness", Role: "reviewer:correctness"}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(instructions, "Planning is the only role that may set contract_index or context_pack") {
+		t.Fatalf("review instructions did not reserve planning evidence: %s", instructions)
+	}
+}
+
 func TestPersistFDLIssueInputRejectsMissingOrOversizedTitle(t *testing.T) {
 	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
 	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"description":"missing title"}`)); err == nil {
