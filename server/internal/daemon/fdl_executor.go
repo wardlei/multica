@@ -405,7 +405,7 @@ func (d *Daemon) terminateFDLRun(ctx context.Context, run PendingFDLIssueRun) er
 		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
 			return err
 		}
-		if err := d.fdlDispatchFault("after_acknowledgement"); err != nil {
+		if err := d.fdlDispatchFault("after_cancellation_acknowledgement"); err != nil {
 			return err
 		}
 	}
@@ -890,6 +890,9 @@ func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID, r
 		receipt.ReturnedEnvelope = output
 		receipt.UpdatedAt = time.Now().UTC()
 		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+		if err := d.fdlDispatchFault("after_acknowledgement"); err != nil {
 			return err
 		}
 	}

@@ -112,6 +112,12 @@ func TestFDLDispatchFaultIsOptIn(t *testing.T) {
 	}
 }
 
+func TestNewFDLDispatchCheckpointIsDisabledInProductionBuild(t *testing.T) {
+	if checkpoint := newFDLDispatchCheckpoint(); checkpoint != nil {
+		t.Fatal("production build unexpectedly enabled an FDL crash checkpoint")
+	}
+}
+
 func TestFDLPlanningExplorationEventPreservesPrivateBinding(t *testing.T) {
 	binding := fdlWorkItemBinding{FDLRunID: "fdl4-run", ExternalWorkID: "work-plan", WorkItemID: "planning", SubmissionToken: "token-private"}
 	event := fdlPlanningExplorationEvent(binding, []any{map[string]any{
