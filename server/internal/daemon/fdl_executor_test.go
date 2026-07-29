@@ -222,6 +222,28 @@ func TestFDLAgentInstructionsUseControllerPhaseContract(t *testing.T) {
 	}
 }
 
+func TestFDLAgentInstructionsDoNotRepeatCompletedExplorerRound(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"title":"Delivery","description":"Request Explorer before Design.","priority":"normal"}`)); err != nil {
+		t.Fatal(err)
+	}
+	payload := fdlDispatchPayload{Instructions: json.RawMessage(`{}`), InputHashes: map[string]string{
+		"task_brief_hash":          "sha256:task-brief",
+		"exploration_round_1_hash": "sha256:exploration",
+	}}
+	payload.Attempt.Phase = "design"
+	instructions, err := d.fdlAgentInstructions("run", fdlWorkItemBinding{WorkItemID: "planning", Role: "planner"}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(instructions, "Explorer round has already completed") || !strings.Contains(instructions, "Do not request Explorer work again") {
+		t.Fatalf("completed Explorer instruction missing: %s", instructions)
+	}
+	if strings.Contains(instructions, "exploration_requests only") {
+		t.Fatalf("completed Explorer instruction still offers another request: %s", instructions)
+	}
+}
+
 func TestPersistFDLIssueInputRejectsMissingOrOversizedTitle(t *testing.T) {
 	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
 	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"description":"missing title"}`)); err == nil {
@@ -308,6 +330,15 @@ func TestFDLBuildsContextPackOnlyForCompletedDesignOrCompactPlanning(t *testing.
 		if got := fdlBuildsContextPack(tt.phase, tt.outcome); got != tt.want {
 			t.Errorf("fdlBuildsContextPack(%q, %q) = %v, want %v", tt.phase, tt.outcome, got, tt.want)
 		}
+	}
+}
+
+func TestFDLHasExplorerEvidence(t *testing.T) {
+	if fdlHasExplorerEvidence(fdlDispatchPayload{InputHashes: map[string]string{"task_brief_hash": "sha256:brief"}}) {
+		t.Fatal("unrelated input hash was treated as Explorer evidence")
+	}
+	if !fdlHasExplorerEvidence(fdlDispatchPayload{InputHashes: map[string]string{"exploration_round_1_hash": "sha256:exploration"}}) {
+		t.Fatal("completed Explorer evidence was not recognized")
 	}
 }
 

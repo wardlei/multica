@@ -814,13 +814,20 @@ The schema_version and artifact_kind fields belong inside contract_index, never 
 `
 	case "design":
 		briefHash := payload.InputHashes["task_brief_hash"]
+		explorerInstruction := `
+If the supplied evidence is insufficient to produce this design, write a non-empty report explaining why and metadata with exploration_requests only: [{"request_id":"impact-analysis","lane":"impact_analysis","question":"bounded question","allowed_paths":["relative/path"],"expected_evidence":["files"]}]. The executor submits that token-bound request directly to the Controller; never create or mention another Agent yourself.
+`
+		if fdlHasExplorerEvidence(payload) {
+			explorerInstruction = `
+An Explorer round has already completed and is bound to this Design dispatch. The frozen Issue requirement to request Explorer has therefore been satisfied. Do not request Explorer work again; use the Controller-bound evidence to finish the design.
+`
+		}
 		return fmt.Sprintf(`
 You MUST write a meta.json object whose contract_index field has this exact shape:
 {"contract_index":{"schema_version":1,"artifact_kind":"design","acceptance_criteria":[],"acceptance_refs":[{"artifact_hash":%q,"keys":["AC-CORE-001"]}],"invariants":[{"key":"INV-CORE-001","statement":"...","acceptance_keys":["AC-CORE-001"],"supersedes":null}]}}
 The schema_version and artifact_kind fields belong inside contract_index, never at the top level of meta.json. The accepted task brief artifact hash is %q. Reference that exact hash and only its accepted AC keys in acceptance_refs. Use stable namespaced INV keys; cite every referenced AC key and every declared INV key in the Markdown design, and do not introduce uncatalogued criteria or invariants. Do not put a context_pack in meta.json: the executor binds its private Controller hashes.
 
-If the supplied evidence is insufficient to produce this design, write a non-empty report explaining why and metadata with exploration_requests only: [{"request_id":"impact-analysis","lane":"impact_analysis","question":"bounded question","allowed_paths":["relative/path"],"expected_evidence":["files"]}]. The executor submits that token-bound request directly to the Controller; never create or mention another Agent yourself.
-`, briefHash, briefHash)
+%s`, briefHash, briefHash, explorerInstruction)
 	case "planning":
 		return `
 You MUST write a meta.json object whose contract_index field has this exact shape:
@@ -842,6 +849,15 @@ func fdlRequiresEvidenceConsistency(payload fdlDispatchPayload) bool {
 
 func fdlBuildsContextPack(phase, outcome string) bool {
 	return outcome == "completed" && (phase == "design" || phase == "planning")
+}
+
+func fdlHasExplorerEvidence(payload fdlDispatchPayload) bool {
+	for key := range payload.InputHashes {
+		if strings.HasPrefix(key, "exploration_round_") && strings.HasSuffix(key, "_hash") {
+			return true
+		}
+	}
+	return false
 }
 
 func fdlExtractsWorkspaceChanges(payload fdlDispatchPayload) bool {
