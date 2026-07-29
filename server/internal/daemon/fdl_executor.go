@@ -1818,16 +1818,28 @@ func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, 
 			args = append(args, "--"+strings.ReplaceAll(field, "_", "-"), path)
 		}
 	}
-	if outcome, ok := meta["outcome"].(string); ok {
-		if outcome != "completed" && outcome != "blocked" && outcome != "failed" {
-			return nil, fmt.Errorf("FDL role metadata outcome is invalid")
-		}
-		args = append(args, "--outcome", outcome)
+	outcome := "completed"
+	if value, ok := meta["outcome"].(string); ok {
+		outcome = value
 	}
-	if decision, ok := meta["decision"].(string); ok {
+	if outcome != "completed" && outcome != "blocked" && outcome != "failed" {
+		return nil, fmt.Errorf("FDL role metadata outcome is invalid")
+	}
+	decision := ""
+	if value, ok := meta["decision"].(string); ok {
+		decision = value
 		if decision != "accepted" && decision != "changes_requested" {
 			return nil, fmt.Errorf("FDL role metadata decision is invalid")
 		}
+	}
+	// FDL v4 represents a review that requests changes as a blocked result.
+	// Agents often report cognitive completion even when they found a blocker;
+	// normalize that wording at the executor boundary before binding the result.
+	if payload.Attempt.Phase == "review" && decision == "changes_requested" && outcome == "completed" {
+		outcome = "blocked"
+	}
+	args = append(args, "--outcome", outcome)
+	if decision != "" {
 		args = append(args, "--decision", decision)
 	}
 	if consistency, ok := meta["evidence_consistency"].(string); ok {
