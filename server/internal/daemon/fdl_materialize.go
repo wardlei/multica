@@ -229,7 +229,7 @@ func (d *Daemon) materializeFDLReviewSnapshot(runID, sourceRoot string, payload 
 	}
 	var rawValue any
 	var snapshot fdlCodeSnapshot
-	if json.Unmarshal(rawSnapshot, &rawValue) != nil || json.Unmarshal(rawSnapshot, &snapshot) != nil || snapshot.SchemaVersion != 3 || len(snapshot.Head) != 40 || snapshot.Branch == "" {
+	if json.Unmarshal(rawSnapshot, &rawValue) != nil || json.Unmarshal(rawSnapshot, &snapshot) != nil || snapshot.SchemaVersion != 4 || len(snapshot.Head) != 40 || snapshot.Branch == "" {
 		return fmt.Errorf("FDL code snapshot is invalid")
 	}
 	canonical, err := canonicalFDLJSON(rawValue)
@@ -288,7 +288,7 @@ func materializeFDLExplorerProjection(sourceRoot string, instructions json.RawMe
 }
 
 func (d *Daemon) readFDLEvidence(runID string, ref fdlEvidenceReference) ([]byte, error) {
-	if ref.SchemaVersion != 1 || ref.Path == "" || !strings.HasPrefix(ref.SHA256, "sha256:") {
+	if ref.SchemaVersion != 4 || ref.Path == "" || !strings.HasPrefix(ref.SHA256, "sha256:") {
 		return nil, fmt.Errorf("FDL evidence reference is invalid")
 	}
 	path, err := fdlRunFilePath(filepath.Join(d.cfg.FDLRunRoot, runID), ref.Path)

@@ -32,7 +32,7 @@ func TestMaterializeFDLReviewWorkspaceUsesFrozenSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := map[string]any{
-		"schema_version": 3,
+		"schema_version": 4,
 		"head":           head,
 		"branch":         "main",
 		"changes": []any{map[string]any{
@@ -59,7 +59,7 @@ func TestMaterializeFDLReviewWorkspaceUsesFrozenSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	implementation, _ := json.Marshal(map[string]any{"code_snapshot": map[string]any{
-		"schema_version": 1, "path": "snapshots/implementation.json", "sha256": "sha256:" + hexDigest(rawSnapshot),
+		"schema_version": 4, "path": "snapshots/implementation.json", "sha256": "sha256:" + hexDigest(rawSnapshot),
 	}})
 	payload := fdlDispatchPayload{InputHashes: map[string]string{"code_snapshot_hash": "sha256:" + hexDigest(canonical)}, InputEvidence: map[string]json.RawMessage{"implementation": implementation}}
 	payload.Attempt.Role = "feature-delivery-reviewer"
