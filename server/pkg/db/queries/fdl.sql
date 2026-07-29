@@ -136,3 +136,64 @@ WHERE id = $1
   AND worktree_snapshot @> jsonb_build_object('daemon_id', sqlc.arg(daemon_id)::text)::jsonb
   AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $3)
 RETURNING *;
+
+-- name: CreateFDLHumanDecision :one
+INSERT INTO fdl_human_decision (
+    workspace_id, fdl_issue_run_id, action_id, decision, submitted_by
+) VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (fdl_issue_run_id, action_id) DO NOTHING
+RETURNING *;
+
+-- name: GetFDLHumanDecisionByAction :one
+SELECT * FROM fdl_human_decision
+WHERE workspace_id = $1
+  AND fdl_issue_run_id = $2
+  AND action_id = $3;
+
+-- name: GetFDLHumanDecisionByIDForDaemon :one
+SELECT d.*
+FROM fdl_human_decision AS d
+JOIN fdl_issue_run AS r ON r.id = d.fdl_issue_run_id
+WHERE d.id = $1
+  AND d.workspace_id = $2
+  AND d.fdl_issue_run_id = $3
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', sqlc.arg(daemon_id)::text)::jsonb;
+
+-- name: GetFDLHumanDecisionForDaemon :one
+SELECT d.*
+FROM fdl_human_decision AS d
+JOIN fdl_issue_run AS r ON r.id = d.fdl_issue_run_id
+WHERE d.workspace_id = $1
+  AND d.fdl_issue_run_id = $2
+  AND d.action_id = $3
+  AND d.status IN ('pending', 'processing')
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', sqlc.arg(daemon_id)::text)::jsonb;
+
+-- name: ClaimFDLHumanDecisionForDaemon :one
+UPDATE fdl_human_decision AS d
+SET status = 'processing',
+    operation_id = sqlc.arg(operation_id),
+    updated_at = now()
+FROM fdl_issue_run AS r
+WHERE d.id = sqlc.arg(id)
+  AND d.workspace_id = sqlc.arg(workspace_id)
+  AND d.fdl_issue_run_id = sqlc.arg(fdl_issue_run_id)
+  AND d.status = 'pending'
+  AND r.id = d.fdl_issue_run_id
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', sqlc.arg(daemon_id)::text)::jsonb
+RETURNING d.*;
+
+-- name: CompleteFDLHumanDecisionForDaemon :one
+UPDATE fdl_human_decision AS d
+SET status = 'submitted',
+    submitted_at = now(),
+    updated_at = now()
+FROM fdl_issue_run AS r
+WHERE d.id = sqlc.arg(id)
+  AND d.workspace_id = sqlc.arg(workspace_id)
+  AND d.fdl_issue_run_id = sqlc.arg(fdl_issue_run_id)
+  AND d.status = 'processing'
+  AND d.operation_id = sqlc.arg(operation_id)
+  AND r.id = d.fdl_issue_run_id
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', sqlc.arg(daemon_id)::text)::jsonb
+RETURNING d.*;

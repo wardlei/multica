@@ -86,6 +86,32 @@ type fdlCancellationReceipt struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// fdlDecisionReceipt preserves the server-side choice and its fixed Controller
+// operation ID across a daemon crash. It stays in executor-private storage.
+type fdlDecisionReceipt struct {
+	SchemaVersion       int             `json:"schema_version"`
+	DecisionID          string          `json:"decision_id"`
+	FDLRunID            string          `json:"fdl_run_id"`
+	ActionID            string          `json:"action_id"`
+	Decision            string          `json:"decision"`
+	OperationID         string          `json:"operation_id"`
+	ControllerSubmitted bool            `json:"controller_submitted"`
+	ReturnedEnvelope    json.RawMessage `json:"returned_envelope,omitempty"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+}
+
+// fdlHandoffReceipt retains the verified delivery handoff outside the FDL run
+// root. Git, PR, and release workflows may consume it later, but never append
+// their state to the Controller run.
+type fdlHandoffReceipt struct {
+	SchemaVersion int             `json:"schema_version"`
+	FDLRunID      string          `json:"fdl_run_id"`
+	ActionID      string          `json:"action_id"`
+	Verified      bool            `json:"verified"`
+	Handoff       json.RawMessage `json:"handoff"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
 // fdlExecutorLoop owns the local side of a frozen Controller run. It never
 // derives work from comments or legacy Squad leader behavior.
 func (d *Daemon) fdlExecutorLoop(ctx context.Context) {
@@ -218,19 +244,23 @@ func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) 
 		if err := d.recoverFDLDispatchReceipt(ctx, run.ID, mailbox); err != nil {
 			return err
 		}
-		// Receipt recovery can atomically replace the mailbox after the last
-		// activation. Re-read it before deciding whether a Controller drive is due.
+		// Dispatch recovery can atomically replace the mailbox after the last
+		// activation. Re-read before checking a decision receipt.
+		mailbox, err = readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
+		if err != nil {
+			return err
+		}
+		if err := d.recoverFDLDecisionReceipt(ctx, run.ID, mailbox); err != nil {
+			return err
+		}
+		// Decision recovery can advance the Controller action after its durable
+		// receipt is acknowledged. Re-read before consuming the mailbox again.
 		mailbox, err = readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
 		if err != nil {
 			return err
 		}
 		if mailbox != nil && mailbox.FDLRunID == *run.FDLRunID && mailbox.ActionID != "" {
-			if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
-				if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
-					return err
-				}
-			}
-			return d.collectFDLTaskResults(ctx, run.ID, *run.FDLRunID)
+			return d.processFDLMailbox(ctx, run, mailbox)
 		}
 		runRoot := filepath.Join(d.cfg.FDLRunRoot, run.ID)
 		operationID, err := newFDLOperationID()
@@ -262,15 +292,31 @@ func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) 
 		if err := writeFDLExecutorJSON(filepath.Join(stateDir, "executor.lease"), lease); err != nil {
 			return err
 		}
-		if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
-			if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
-				return err
-			}
-		}
-		if err := d.collectFDLTaskResults(ctx, run.ID, *run.FDLRunID); err != nil {
+		return d.processFDLMailbox(ctx, run, mailbox)
+	})
+}
+
+func (d *Daemon) processFDLMailbox(ctx context.Context, run PendingFDLIssueRun, mailbox *fdlExecutorMailbox) error {
+	if run.FDLRunID == nil {
+		return fmt.Errorf("FDL mailbox has no Controller run ID")
+	}
+	switch mailbox.ActionKind {
+	case "request_human_decision":
+		return d.processFDLHumanDecision(ctx, run, mailbox)
+	case "handoff_external":
+		return d.processFDLHandoff(ctx, run, mailbox)
+	}
+	if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
+		if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
 			return err
 		}
-		return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, "running", fdlProjectionPhase(run.Phase), "", "Controller action is held by the local executor", mailbox.ActionKind)
+	}
+	if err := d.collectFDLTaskResults(ctx, run.ID, *run.FDLRunID); err != nil {
+		return err
+	}
+	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+		Status: "running", Phase: fdlProjectionPhase(run.Phase),
+		Summary: "Controller action is held by the local executor", ActionType: mailbox.ActionKind,
 	})
 }
 
@@ -872,6 +918,255 @@ func fdlMailboxFromEnvelope(raw json.RawMessage) *fdlExecutorMailbox {
 		return &fdlExecutorMailbox{}
 	}
 	return &fdlExecutorMailbox{SchemaVersion: 1, FDLRunID: envelope.RunID, ActionID: envelope.NextAction.ActionID, ActionKind: envelope.NextAction.Kind, Envelope: raw, UpdatedAt: time.Now().UTC()}
+}
+
+type fdlHumanDecisionAction struct {
+	Kind  string `json:"kind"`
+	Phase string `json:"phase"`
+}
+
+func fdlMailboxDecision(mailbox *fdlExecutorMailbox) (fdlHumanDecisionAction, error) {
+	var envelope struct {
+		RunID      string `json:"run_id"`
+		NextAction struct {
+			ActionID string                 `json:"action_id"`
+			Kind     string                 `json:"kind"`
+			Decision fdlHumanDecisionAction `json:"decision"`
+		} `json:"next_action"`
+	}
+	if json.Unmarshal(mailbox.Envelope, &envelope) != nil || envelope.RunID != mailbox.FDLRunID || envelope.NextAction.ActionID != mailbox.ActionID || envelope.NextAction.Kind != "request_human_decision" || envelope.NextAction.Decision.Kind == "" {
+		return fdlHumanDecisionAction{}, fmt.Errorf("decode FDL human decision action")
+	}
+	return envelope.NextAction.Decision, nil
+}
+
+func fdlDecisionChoices(kind string) ([]string, bool) {
+	switch kind {
+	case "planning_checkpoint":
+		return []string{"accept", "reject", "retry", "cancel"}, true
+	case "final_approval":
+		return []string{"accept", "approve", "reject", "cancel"}, true
+	case "review_changes":
+		return []string{"accept", "retry", "reject", "cancel"}, true
+	case "environment_preflight_blocked":
+		return []string{"retry", "cancel"}, true
+	case "role_not_completed", "gate_failure", "code_snapshot_drift":
+		return []string{"accept", "retry", "reject", "cancel"}, true
+	default:
+		return nil, false
+	}
+}
+
+func fdlDecisionPhase(kind, controllerPhase string) string {
+	switch kind {
+	case "planning_checkpoint":
+		if controllerPhase == "intake" || controllerPhase == "design" {
+			return controllerPhase
+		}
+		return "design"
+	case "final_approval", "review_changes":
+		return "review"
+	case "gate_failure":
+		return "gate"
+	case "environment_preflight_blocked":
+		return "pre_design"
+	default:
+		return "implementation"
+	}
+}
+
+func (d *Daemon) decisionReceiptPath(runID string) string {
+	return filepath.Join(d.fdlExecutorStateDir(runID), "decision-receipt.json")
+}
+
+func (d *Daemon) processFDLHumanDecision(ctx context.Context, run PendingFDLIssueRun, mailbox *fdlExecutorMailbox) error {
+	action, err := fdlMailboxDecision(mailbox)
+	if err != nil {
+		return err
+	}
+	choices, ok := fdlDecisionChoices(action.Kind)
+	if !ok {
+		return fmt.Errorf("unsupported FDL human decision kind %q", action.Kind)
+	}
+	if err := d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+		Status: "awaiting_human_decision", Phase: fdlDecisionPhase(action.Kind, action.Phase),
+		WaitingReason: "A structured FDL decision is required", ActionType: mailbox.ActionKind,
+		DecisionActionID: mailbox.ActionID, DecisionKind: action.Kind, AllowedDecisions: choices,
+	}); err != nil {
+		return err
+	}
+	decision, err := d.client.GetFDLHumanDecision(ctx, run.ID, mailbox.ActionID)
+	if err != nil {
+		var requestErr *requestError
+		if errors.As(err, &requestErr) && requestErr.StatusCode == 404 {
+			return nil
+		}
+		return fmt.Errorf("load FDL human decision: %w", err)
+	}
+	if decision.ActionID != mailbox.ActionID || !fdlDecisionAllowed(choices, decision.Decision) {
+		return fmt.Errorf("FDL human decision does not match current Controller action")
+	}
+	return d.submitFDLHumanDecision(ctx, run.ID, mailbox, decision)
+}
+
+func fdlDecisionAllowed(choices []string, decision string) bool {
+	for _, choice := range choices {
+		if decision == choice {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) submitFDLHumanDecision(ctx context.Context, runID string, mailbox *fdlExecutorMailbox, decision FDLHumanDecision) error {
+	receiptPath := d.decisionReceiptPath(runID)
+	var receipt fdlDecisionReceipt
+	found, err := readFDLExecutorJSON(receiptPath, &receipt)
+	if err != nil {
+		return err
+	}
+	if found {
+		if receipt.SchemaVersion != 1 || receipt.DecisionID != decision.ID || receipt.FDLRunID != mailbox.FDLRunID || receipt.ActionID != mailbox.ActionID || receipt.Decision != decision.Decision || receipt.OperationID == "" {
+			return fmt.Errorf("FDL decision receipt conflicts with mailbox")
+		}
+	} else {
+		operationID := ""
+		if decision.Status == "pending" {
+			operationID, err = newFDLOperationID()
+			if err != nil {
+				return err
+			}
+			decision, err = d.client.ClaimFDLHumanDecision(ctx, runID, decision.ID, operationID)
+			if err != nil {
+				return fmt.Errorf("claim FDL human decision: %w", err)
+			}
+		}
+		if decision.Status != "processing" || decision.OperationID == nil || *decision.OperationID == "" {
+			return fmt.Errorf("FDL human decision has no recoverable operation")
+		}
+		receipt = fdlDecisionReceipt{
+			SchemaVersion: 1, DecisionID: decision.ID, FDLRunID: mailbox.FDLRunID, ActionID: mailbox.ActionID,
+			Decision: decision.Decision, OperationID: *decision.OperationID, UpdatedAt: time.Now().UTC(),
+		}
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	if !receipt.ControllerSubmitted {
+		eventPath := filepath.Join(d.fdlExecutorStateDir(runID), "decision-event.json")
+		event := map[string]any{
+			"envelope_version": 1, "kind": "human_decision_submitted", "run_id": receipt.FDLRunID,
+			"action_id": receipt.ActionID, "decision": map[string]string{"decision": receipt.Decision},
+		}
+		if err := writeFDLExecutorJSON(eventPath, event); err != nil {
+			return err
+		}
+		output, err := d.runFDLCommandOutput(ctx, "drive-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--operation-id", receipt.OperationID, "--event", eventPath)
+		if err != nil {
+			return fmt.Errorf("submit FDL human decision: %w", err)
+		}
+		if err := validateFDLReturnedEnvelope(output, receipt.FDLRunID); err != nil {
+			return err
+		}
+		receipt.ControllerSubmitted = true
+		receipt.ReturnedEnvelope = output
+		receipt.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	return d.finalizeFDLDecisionReceipt(ctx, runID, receipt)
+}
+
+func (d *Daemon) recoverFDLDecisionReceipt(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+	var receipt fdlDecisionReceipt
+	found, err := readFDLExecutorJSON(d.decisionReceiptPath(runID), &receipt)
+	if err != nil || !found {
+		return err
+	}
+	if receipt.SchemaVersion != 1 || receipt.DecisionID == "" || receipt.FDLRunID == "" || receipt.ActionID == "" || receipt.Decision == "" || receipt.OperationID == "" {
+		return fmt.Errorf("invalid FDL decision receipt")
+	}
+	if !receipt.ControllerSubmitted {
+		if mailbox == nil || mailbox.FDLRunID != receipt.FDLRunID || mailbox.ActionID != receipt.ActionID || mailbox.ActionKind != "request_human_decision" {
+			return fmt.Errorf("unsubmitted FDL decision receipt conflicts with mailbox")
+		}
+		return nil
+	}
+	if err := validateFDLReturnedEnvelope(receipt.ReturnedEnvelope, receipt.FDLRunID); err != nil {
+		return err
+	}
+	returned := fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)
+	if mailbox != nil && mailbox.ActionID != receipt.ActionID && mailbox.ActionID != returned.ActionID {
+		return fmt.Errorf("submitted FDL decision receipt conflicts with mailbox")
+	}
+	return d.finalizeFDLDecisionReceipt(ctx, runID, receipt)
+}
+
+func (d *Daemon) finalizeFDLDecisionReceipt(ctx context.Context, runID string, receipt fdlDecisionReceipt) error {
+	if err := d.client.CompleteFDLHumanDecision(ctx, runID, receipt.DecisionID, receipt.OperationID); err != nil {
+		return fmt.Errorf("complete FDL human decision: %w", err)
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
+		return err
+	}
+	if err := os.Remove(d.decisionReceiptPath(runID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove completed FDL decision receipt: %w", err)
+	}
+	if err := os.Remove(filepath.Join(d.fdlExecutorStateDir(runID), "decision-event.json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove submitted FDL decision event: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) processFDLHandoff(ctx context.Context, run PendingFDLIssueRun, mailbox *fdlExecutorMailbox) error {
+	if run.FDLRunID == nil || *run.FDLRunID != mailbox.FDLRunID {
+		return fmt.Errorf("FDL handoff mailbox has invalid run binding")
+	}
+	receiptPath := filepath.Join(d.fdlExecutorStateDir(run.ID), "handoff-receipt.json")
+	var receipt fdlHandoffReceipt
+	found, err := readFDLExecutorJSON(receiptPath, &receipt)
+	if err != nil {
+		return err
+	}
+	if found {
+		if receipt.SchemaVersion != 1 || !receipt.Verified || receipt.FDLRunID != mailbox.FDLRunID || receipt.ActionID != mailbox.ActionID || len(receipt.Handoff) == 0 {
+			return fmt.Errorf("FDL handoff receipt conflicts with mailbox")
+		}
+	} else {
+		runRoot := filepath.Join(d.cfg.FDLRunRoot, run.ID)
+		verified, err := d.runFDLCommandOutput(ctx, "verify-run", "--run-root", runRoot)
+		if err != nil {
+			return fmt.Errorf("verify FDL delivery handoff: %w", err)
+		}
+		var verification struct {
+			Verified bool   `json:"verified"`
+			RunID    string `json:"run_id"`
+			Status   string `json:"status"`
+		}
+		if json.Unmarshal(verified, &verification) != nil || !verification.Verified || verification.RunID != mailbox.FDLRunID || verification.Status != "completed" {
+			return fmt.Errorf("FDL delivery handoff verification is invalid")
+		}
+		handoff, err := d.runFDLCommandOutput(ctx, "render-delivery-handoff", "--run-root", runRoot)
+		if err != nil {
+			return fmt.Errorf("render FDL delivery handoff: %w", err)
+		}
+		var document struct {
+			Contract    string `json:"contract"`
+			RunID       string `json:"run_id"`
+			HandoffHash string `json:"handoff_hash"`
+		}
+		if json.Unmarshal(handoff, &document) != nil || document.Contract != "verified-change-set/v1" || document.RunID != mailbox.FDLRunID || document.HandoffHash == "" {
+			return fmt.Errorf("FDL delivery handoff document is invalid")
+		}
+		receipt = fdlHandoffReceipt{SchemaVersion: 1, FDLRunID: mailbox.FDLRunID, ActionID: mailbox.ActionID, Verified: true, Handoff: handoff, UpdatedAt: time.Now().UTC()}
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, FDLProjection{
+		Status: "handoff_ready", Phase: "handoff", Summary: "FDL run is verified and ready for an independent Git workflow.", ActionType: "handoff_external",
+	})
 }
 
 // collectFDLTaskResults is intentionally independent from a mailbox action:

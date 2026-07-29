@@ -1,4 +1,4 @@
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 
 // These are projections and mutable templates owned by the server. The FDL
@@ -24,5 +24,13 @@ export function fdlIssueRunOptions(wsId: string, issueId: string) {
     queryKey: fdlKeys.issueRun(wsId, issueId),
     queryFn: () => api.getFDLIssueRun(issueId),
     enabled: !!issueId,
+  });
+}
+
+export function useSubmitFDLHumanDecision(wsId: string, issueId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { action_id: string; decision: string }) => api.submitFDLHumanDecision(issueId, input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: fdlKeys.issueRun(wsId, issueId) }),
   });
 }

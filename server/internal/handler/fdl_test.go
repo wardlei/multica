@@ -285,6 +285,62 @@ func TestDaemonFDLRunLifecycleIsWorktreeBoundAndSnapshotsIssue(t *testing.T) {
 		t.Fatalf("UpdateFDLIssueRunProjectionForDaemon: expected 200, got %d: %s", projectionRecorder.Code, projectionRecorder.Body.String())
 	}
 
+	// A user decision is action-bound durable input, never a comment command.
+	decisionActionID := "fdl-human-action-001"
+	decisionProjectionRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/projection", strings.NewReader(`{"status":"awaiting_human_decision","phase":"review","action_type":"request_human_decision","decision_action_id":"`+decisionActionID+`","decision_kind":"final_approval","allowed_decisions":["accept","approve","reject","cancel"]}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
+	decisionProjectionRecorder := httptest.NewRecorder()
+	testHandler.UpdateFDLIssueRunProjectionForDaemon(decisionProjectionRecorder, decisionProjectionRequest)
+	if decisionProjectionRecorder.Code != http.StatusOK {
+		t.Fatalf("project FDL human decision: expected 200, got %d: %s", decisionProjectionRecorder.Code, decisionProjectionRecorder.Body.String())
+	}
+
+	staleDecisionRecorder := httptest.NewRecorder()
+	testHandler.SubmitFDLHumanDecision(staleDecisionRecorder, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/fdl-run/decisions?workspace_id="+testWorkspaceID, map[string]string{"action_id": "stale-action", "decision": "approve"}), "id", issue.ID))
+	if staleDecisionRecorder.Code != http.StatusConflict {
+		t.Fatalf("stale FDL decision: expected 409, got %d: %s", staleDecisionRecorder.Code, staleDecisionRecorder.Body.String())
+	}
+
+	decisionRecorder := httptest.NewRecorder()
+	testHandler.SubmitFDLHumanDecision(decisionRecorder, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/fdl-run/decisions?workspace_id="+testWorkspaceID, map[string]string{"action_id": decisionActionID, "decision": "approve"}), "id", issue.ID))
+	if decisionRecorder.Code != http.StatusAccepted {
+		t.Fatalf("submit FDL decision: expected 202, got %d: %s", decisionRecorder.Code, decisionRecorder.Body.String())
+	}
+	var submittedDecision daemonFDLHumanDecisionResponse
+	decisionReadRequest := withURLParams(httptest.NewRequest(http.MethodGet, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/decisions/"+decisionActionID, nil).WithContext(daemonContext), "id", pending.Runs[0].ID, "actionId", decisionActionID)
+	decisionReadRecorder := httptest.NewRecorder()
+	testHandler.GetFDLHumanDecisionForDaemon(decisionReadRecorder, decisionReadRequest)
+	if decisionReadRecorder.Code != http.StatusOK || json.NewDecoder(decisionReadRecorder.Body).Decode(&submittedDecision) != nil || submittedDecision.Decision != "approve" || submittedDecision.Status != "pending" {
+		t.Fatalf("read pending FDL decision: status=%d body=%s", decisionReadRecorder.Code, decisionReadRecorder.Body.String())
+	}
+
+	claimRecorder := httptest.NewRecorder()
+	claimRequest := withURLParams(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/decisions/"+submittedDecision.ID+"/claim", strings.NewReader(`{"operation_id":"multica-decision-test-001"}`)).WithContext(daemonContext), "id", pending.Runs[0].ID, "decisionId", submittedDecision.ID)
+	testHandler.ClaimFDLHumanDecisionForDaemon(claimRecorder, claimRequest)
+	if claimRecorder.Code != http.StatusOK {
+		t.Fatalf("claim FDL decision: expected 200, got %d: %s", claimRecorder.Code, claimRecorder.Body.String())
+	}
+	completeRecorder := httptest.NewRecorder()
+	completeRequest := withURLParams(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/decisions/"+submittedDecision.ID+"/complete", strings.NewReader(`{"operation_id":"multica-decision-test-001"}`)).WithContext(daemonContext), "id", pending.Runs[0].ID, "decisionId", submittedDecision.ID)
+	testHandler.CompleteFDLHumanDecisionForDaemon(completeRecorder, completeRequest)
+	if completeRecorder.Code != http.StatusOK {
+		t.Fatalf("complete FDL decision: expected 200, got %d: %s", completeRecorder.Code, completeRecorder.Body.String())
+	}
+	// Completion replay is safe after a daemon crash between Controller submit
+	// and the local receipt cleanup.
+	replayCompleteRecorder := httptest.NewRecorder()
+	replayCompleteRequest := withURLParams(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/decisions/"+submittedDecision.ID+"/complete", strings.NewReader(`{"operation_id":"multica-decision-test-001"}`)).WithContext(daemonContext), "id", pending.Runs[0].ID, "decisionId", submittedDecision.ID)
+	testHandler.CompleteFDLHumanDecisionForDaemon(replayCompleteRecorder, replayCompleteRequest)
+	if replayCompleteRecorder.Code != http.StatusOK {
+		t.Fatalf("replay FDL decision completion: expected 200, got %d: %s", replayCompleteRecorder.Code, replayCompleteRecorder.Body.String())
+	}
+
+	resetProjectionRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/projection", strings.NewReader(`{"status":"running","phase":"intake"}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
+	resetProjectionRecorder := httptest.NewRecorder()
+	testHandler.UpdateFDLIssueRunProjectionForDaemon(resetProjectionRecorder, resetProjectionRequest)
+	if resetProjectionRecorder.Code != http.StatusOK {
+		t.Fatalf("reset FDL projection: expected 200, got %d: %s", resetProjectionRecorder.Code, resetProjectionRecorder.Body.String())
+	}
+
 	missingIsolationRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/tasks", strings.NewReader(`{"role":"reviewer:correctness","instructions":"Review only the supplied snapshot.","dispatch_key":"multica-review-without-isolation-001","execution_workspace":null}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
 	missingIsolationRecorder := httptest.NewRecorder()
 	testHandler.CreateFDLAgentTaskForDaemon(missingIsolationRecorder, missingIsolationRequest)

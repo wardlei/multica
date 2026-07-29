@@ -527,6 +527,20 @@ type FdlDeliveryProfile struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 }
 
+type FdlHumanDecision struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID        `json:"fdl_issue_run_id"`
+	ActionID      string             `json:"action_id"`
+	Decision      string             `json:"decision"`
+	SubmittedBy   pgtype.UUID        `json:"submitted_by"`
+	Status        string             `json:"status"`
+	OperationID   pgtype.Text        `json:"operation_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	SubmittedAt   pgtype.Timestamptz `json:"submitted_at"`
+}
+
 type FdlIssueRun struct {
 	ID               pgtype.UUID        `json:"id"`
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`

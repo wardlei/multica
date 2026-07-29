@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -160,5 +161,24 @@ func TestFDLExecutorLeaseAndMailboxRecoverAcrossHolderRestart(t *testing.T) {
 	}
 	if got.FDLRunID != want.FDLRunID || got.ActionID != want.ActionID || got.ActionKind != want.ActionKind {
 		t.Fatalf("mailbox = %#v, want %#v", got, want)
+	}
+}
+
+func TestFDLHumanDecisionChoicesFollowControllerCheckpointKind(t *testing.T) {
+	tests := []struct {
+		kind string
+		want []string
+		ok   bool
+	}{
+		{kind: "planning_checkpoint", want: []string{"accept", "reject", "retry", "cancel"}, ok: true},
+		{kind: "final_approval", want: []string{"accept", "approve", "reject", "cancel"}, ok: true},
+		{kind: "environment_preflight_blocked", want: []string{"retry", "cancel"}, ok: true},
+		{kind: "unknown", ok: false},
+	}
+	for _, tt := range tests {
+		got, ok := fdlDecisionChoices(tt.kind)
+		if ok != tt.ok || !slices.Equal(got, tt.want) {
+			t.Fatalf("fdlDecisionChoices(%q) = (%v, %v), want (%v, %v)", tt.kind, got, ok, tt.want, tt.ok)
+		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -143,6 +144,82 @@ func (h *Handler) GetFDLIssueRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fdlIssueRunToResponse(run))
+}
+
+type submitFDLHumanDecisionRequest struct {
+	ActionID string `json:"action_id"`
+	Decision string `json:"decision"`
+}
+
+type fdlDecisionProjection struct {
+	DecisionActionID string   `json:"decision_action_id"`
+	AllowedDecisions []string `json:"allowed_decisions"`
+}
+
+// SubmitFDLHumanDecision records a structured user choice for the local
+// executor. It deliberately does not drive the Controller: only the daemon
+// that owns the frozen worktree can bind this receipt to a mailbox action.
+func (h *Handler) SubmitFDLHumanDecision(w http.ResponseWriter, r *http.Request) {
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	if issue.OrchestrationMode != "fdl" {
+		writeError(w, http.StatusNotFound, "issue does not use FDL delivery")
+		return
+	}
+	var request submitFDLHumanDecisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid FDL decision request")
+		return
+	}
+	request.ActionID = strings.TrimSpace(request.ActionID)
+	request.Decision = strings.TrimSpace(request.Decision)
+	if request.ActionID == "" || len(request.ActionID) > 256 || request.Decision == "" || len(request.Decision) > 32 {
+		writeError(w, http.StatusBadRequest, "a valid FDL decision action is required")
+		return
+	}
+	run, err := h.Queries.GetFDLIssueRunByIssue(r.Context(), db.GetFDLIssueRunByIssueParams{IssueID: issue.ID, WorkspaceID: issue.WorkspaceID})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "FDL delivery run not found")
+		return
+	}
+	var projection fdlDecisionProjection
+	if json.Unmarshal(run.StateProjection, &projection) != nil || run.Status != "awaiting_human_decision" || projection.DecisionActionID != request.ActionID || !fdlDecisionAllowed(projection.AllowedDecisions, request.Decision) {
+		writeError(w, http.StatusConflict, "FDL decision action is no longer current")
+		return
+	}
+	member, ok := h.requireWorkspaceMember(w, r, uuidToString(issue.WorkspaceID), "workspace not found")
+	if !ok {
+		return
+	}
+	decision, err := h.Queries.CreateFDLHumanDecision(r.Context(), db.CreateFDLHumanDecisionParams{
+		WorkspaceID: issue.WorkspaceID, FdlIssueRunID: run.ID, ActionID: request.ActionID,
+		Decision: request.Decision, SubmittedBy: member.UserID,
+	})
+	if err == pgx.ErrNoRows {
+		existing, lookupErr := h.Queries.GetFDLHumanDecisionByAction(r.Context(), db.GetFDLHumanDecisionByActionParams{
+			WorkspaceID: issue.WorkspaceID, FdlIssueRunID: run.ID, ActionID: request.ActionID,
+		})
+		if lookupErr != nil || existing.Decision != request.Decision {
+			writeError(w, http.StatusConflict, "a different FDL decision is already recorded")
+			return
+		}
+		decision = existing
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "record FDL decision failed")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": uuidToString(decision.ID), "status": decision.Status})
+}
+
+func fdlDecisionAllowed(allowed []string, decision string) bool {
+	for _, candidate := range allowed {
+		if candidate == decision {
+			return true
+		}
+	}
+	return false
 }
 
 // ListFDLDeliveryProfiles returns current workflow templates. The template is

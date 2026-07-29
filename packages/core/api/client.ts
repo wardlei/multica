@@ -2714,6 +2714,13 @@ export class ApiClient {
     return run;
   }
 
+  async submitFDLHumanDecision(issueId: string, data: { action_id: string; decision: string }): Promise<void> {
+    await this.fetch(`/api/issues/${issueId}/fdl-run/decisions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
   async listSquadMembers(squadId: string): Promise<SquadMember[]> {
     return this.fetch(`/api/squads/${squadId}/members`);
   }

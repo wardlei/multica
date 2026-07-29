@@ -44,6 +44,103 @@ func (q *Queries) ArchiveFDLDeliveryProfile(ctx context.Context, arg ArchiveFDLD
 	return i, err
 }
 
+const claimFDLHumanDecisionForDaemon = `-- name: ClaimFDLHumanDecisionForDaemon :one
+UPDATE fdl_human_decision AS d
+SET status = 'processing',
+    operation_id = $1,
+    updated_at = now()
+FROM fdl_issue_run AS r
+WHERE d.id = $2
+  AND d.workspace_id = $3
+  AND d.fdl_issue_run_id = $4
+  AND d.status = 'pending'
+  AND r.id = d.fdl_issue_run_id
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', $5::text)::jsonb
+RETURNING d.id, d.workspace_id, d.fdl_issue_run_id, d.action_id, d.decision, d.submitted_by, d.status, d.operation_id, d.created_at, d.updated_at, d.submitted_at
+`
+
+type ClaimFDLHumanDecisionForDaemonParams struct {
+	OperationID   pgtype.Text `json:"operation_id"`
+	ID            pgtype.UUID `json:"id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID `json:"fdl_issue_run_id"`
+	DaemonID      string      `json:"daemon_id"`
+}
+
+func (q *Queries) ClaimFDLHumanDecisionForDaemon(ctx context.Context, arg ClaimFDLHumanDecisionForDaemonParams) (FdlHumanDecision, error) {
+	row := q.db.QueryRow(ctx, claimFDLHumanDecisionForDaemon,
+		arg.OperationID,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.FdlIssueRunID,
+		arg.DaemonID,
+	)
+	var i FdlHumanDecision
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.FdlIssueRunID,
+		&i.ActionID,
+		&i.Decision,
+		&i.SubmittedBy,
+		&i.Status,
+		&i.OperationID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedAt,
+	)
+	return i, err
+}
+
+const completeFDLHumanDecisionForDaemon = `-- name: CompleteFDLHumanDecisionForDaemon :one
+UPDATE fdl_human_decision AS d
+SET status = 'submitted',
+    submitted_at = now(),
+    updated_at = now()
+FROM fdl_issue_run AS r
+WHERE d.id = $1
+  AND d.workspace_id = $2
+  AND d.fdl_issue_run_id = $3
+  AND d.status = 'processing'
+  AND d.operation_id = $4
+  AND r.id = d.fdl_issue_run_id
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', $5::text)::jsonb
+RETURNING d.id, d.workspace_id, d.fdl_issue_run_id, d.action_id, d.decision, d.submitted_by, d.status, d.operation_id, d.created_at, d.updated_at, d.submitted_at
+`
+
+type CompleteFDLHumanDecisionForDaemonParams struct {
+	ID            pgtype.UUID `json:"id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID `json:"fdl_issue_run_id"`
+	OperationID   pgtype.Text `json:"operation_id"`
+	DaemonID      string      `json:"daemon_id"`
+}
+
+func (q *Queries) CompleteFDLHumanDecisionForDaemon(ctx context.Context, arg CompleteFDLHumanDecisionForDaemonParams) (FdlHumanDecision, error) {
+	row := q.db.QueryRow(ctx, completeFDLHumanDecisionForDaemon,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.FdlIssueRunID,
+		arg.OperationID,
+		arg.DaemonID,
+	)
+	var i FdlHumanDecision
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.FdlIssueRunID,
+		&i.ActionID,
+		&i.Decision,
+		&i.SubmittedBy,
+		&i.Status,
+		&i.OperationID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedAt,
+	)
+	return i, err
+}
+
 const createFDLDeliveryProfile = `-- name: CreateFDLDeliveryProfile :one
 INSERT INTO fdl_delivery_profile (
     workspace_id, name, description, squad_id, controller_config, role_bindings, created_by
@@ -85,6 +182,47 @@ func (q *Queries) CreateFDLDeliveryProfile(ctx context.Context, arg CreateFDLDel
 		&i.ArchivedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createFDLHumanDecision = `-- name: CreateFDLHumanDecision :one
+INSERT INTO fdl_human_decision (
+    workspace_id, fdl_issue_run_id, action_id, decision, submitted_by
+) VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (fdl_issue_run_id, action_id) DO NOTHING
+RETURNING id, workspace_id, fdl_issue_run_id, action_id, decision, submitted_by, status, operation_id, created_at, updated_at, submitted_at
+`
+
+type CreateFDLHumanDecisionParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID `json:"fdl_issue_run_id"`
+	ActionID      string      `json:"action_id"`
+	Decision      string      `json:"decision"`
+	SubmittedBy   pgtype.UUID `json:"submitted_by"`
+}
+
+func (q *Queries) CreateFDLHumanDecision(ctx context.Context, arg CreateFDLHumanDecisionParams) (FdlHumanDecision, error) {
+	row := q.db.QueryRow(ctx, createFDLHumanDecision,
+		arg.WorkspaceID,
+		arg.FdlIssueRunID,
+		arg.ActionID,
+		arg.Decision,
+		arg.SubmittedBy,
+	)
+	var i FdlHumanDecision
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.FdlIssueRunID,
+		&i.ActionID,
+		&i.Decision,
+		&i.SubmittedBy,
+		&i.Status,
+		&i.OperationID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedAt,
 	)
 	return i, err
 }
@@ -216,6 +354,121 @@ func (q *Queries) GetFDLDeliveryProfileInWorkspace(ctx context.Context, arg GetF
 		&i.ArchivedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getFDLHumanDecisionByAction = `-- name: GetFDLHumanDecisionByAction :one
+SELECT id, workspace_id, fdl_issue_run_id, action_id, decision, submitted_by, status, operation_id, created_at, updated_at, submitted_at FROM fdl_human_decision
+WHERE workspace_id = $1
+  AND fdl_issue_run_id = $2
+  AND action_id = $3
+`
+
+type GetFDLHumanDecisionByActionParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID `json:"fdl_issue_run_id"`
+	ActionID      string      `json:"action_id"`
+}
+
+func (q *Queries) GetFDLHumanDecisionByAction(ctx context.Context, arg GetFDLHumanDecisionByActionParams) (FdlHumanDecision, error) {
+	row := q.db.QueryRow(ctx, getFDLHumanDecisionByAction, arg.WorkspaceID, arg.FdlIssueRunID, arg.ActionID)
+	var i FdlHumanDecision
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.FdlIssueRunID,
+		&i.ActionID,
+		&i.Decision,
+		&i.SubmittedBy,
+		&i.Status,
+		&i.OperationID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedAt,
+	)
+	return i, err
+}
+
+const getFDLHumanDecisionByIDForDaemon = `-- name: GetFDLHumanDecisionByIDForDaemon :one
+SELECT d.id, d.workspace_id, d.fdl_issue_run_id, d.action_id, d.decision, d.submitted_by, d.status, d.operation_id, d.created_at, d.updated_at, d.submitted_at
+FROM fdl_human_decision AS d
+JOIN fdl_issue_run AS r ON r.id = d.fdl_issue_run_id
+WHERE d.id = $1
+  AND d.workspace_id = $2
+  AND d.fdl_issue_run_id = $3
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', $4::text)::jsonb
+`
+
+type GetFDLHumanDecisionByIDForDaemonParams struct {
+	ID            pgtype.UUID `json:"id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID `json:"fdl_issue_run_id"`
+	DaemonID      string      `json:"daemon_id"`
+}
+
+func (q *Queries) GetFDLHumanDecisionByIDForDaemon(ctx context.Context, arg GetFDLHumanDecisionByIDForDaemonParams) (FdlHumanDecision, error) {
+	row := q.db.QueryRow(ctx, getFDLHumanDecisionByIDForDaemon,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.FdlIssueRunID,
+		arg.DaemonID,
+	)
+	var i FdlHumanDecision
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.FdlIssueRunID,
+		&i.ActionID,
+		&i.Decision,
+		&i.SubmittedBy,
+		&i.Status,
+		&i.OperationID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedAt,
+	)
+	return i, err
+}
+
+const getFDLHumanDecisionForDaemon = `-- name: GetFDLHumanDecisionForDaemon :one
+SELECT d.id, d.workspace_id, d.fdl_issue_run_id, d.action_id, d.decision, d.submitted_by, d.status, d.operation_id, d.created_at, d.updated_at, d.submitted_at
+FROM fdl_human_decision AS d
+JOIN fdl_issue_run AS r ON r.id = d.fdl_issue_run_id
+WHERE d.workspace_id = $1
+  AND d.fdl_issue_run_id = $2
+  AND d.action_id = $3
+  AND d.status IN ('pending', 'processing')
+  AND r.worktree_snapshot @> jsonb_build_object('daemon_id', $4::text)::jsonb
+`
+
+type GetFDLHumanDecisionForDaemonParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	FdlIssueRunID pgtype.UUID `json:"fdl_issue_run_id"`
+	ActionID      string      `json:"action_id"`
+	DaemonID      string      `json:"daemon_id"`
+}
+
+func (q *Queries) GetFDLHumanDecisionForDaemon(ctx context.Context, arg GetFDLHumanDecisionForDaemonParams) (FdlHumanDecision, error) {
+	row := q.db.QueryRow(ctx, getFDLHumanDecisionForDaemon,
+		arg.WorkspaceID,
+		arg.FdlIssueRunID,
+		arg.ActionID,
+		arg.DaemonID,
+	)
+	var i FdlHumanDecision
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.FdlIssueRunID,
+		&i.ActionID,
+		&i.Decision,
+		&i.SubmittedBy,
+		&i.Status,
+		&i.OperationID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedAt,
 	)
 	return i, err
 }

@@ -510,16 +510,21 @@ func (c *Client) InitializeFDLIssueRun(ctx context.Context, id, fdlRunID string)
 	}, &initializeFDLIssueRunResponse{})
 }
 
-// UpdateFDLIssueRunProjection reports display-safe lifecycle facts. It is not
-// a Controller state write and must not contain result bindings or tokens.
-func (c *Client) UpdateFDLIssueRunProjection(ctx context.Context, id, status, phase, waitingReason, summary, actionType string) error {
-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/projection", id), map[string]string{
-		"status":         status,
-		"phase":          phase,
-		"waiting_reason": waitingReason,
-		"summary":        summary,
-		"action_type":    actionType,
-	}, nil)
+// FDLProjection reports display-safe lifecycle facts. It is not Controller
+// state and must not contain result bindings, tokens, or local paths.
+type FDLProjection struct {
+	Status           string   `json:"status"`
+	Phase            string   `json:"phase"`
+	WaitingReason    string   `json:"waiting_reason,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	ActionType       string   `json:"action_type,omitempty"`
+	DecisionActionID string   `json:"decision_action_id,omitempty"`
+	DecisionKind     string   `json:"decision_kind,omitempty"`
+	AllowedDecisions []string `json:"allowed_decisions,omitempty"`
+}
+
+func (c *Client) UpdateFDLIssueRunProjection(ctx context.Context, id string, projection FDLProjection) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/projection", id), projection, nil)
 }
 
 func (c *Client) CancelFDLIssueRun(ctx context.Context, id, reason string) error {
@@ -553,6 +558,36 @@ func (c *Client) CreateFDLAgentTask(ctx context.Context, runID, role, instructio
 
 func (c *Client) ActivateFDLAgentTask(ctx context.Context, runID, taskID string) error {
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks/%s/activate", runID, taskID), map[string]any{}, nil)
+}
+
+// FDLHumanDecision is an executor-private receipt. It contains no Controller
+// envelope, work identity, submission token, or run-root path.
+type FDLHumanDecision struct {
+	ID          string  `json:"id"`
+	ActionID    string  `json:"action_id"`
+	Decision    string  `json:"decision"`
+	Status      string  `json:"status"`
+	OperationID *string `json:"operation_id,omitempty"`
+}
+
+func (c *Client) GetFDLHumanDecision(ctx context.Context, runID, actionID string) (FDLHumanDecision, error) {
+	var response FDLHumanDecision
+	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/decisions/%s", runID, actionID), &response); err != nil {
+		return FDLHumanDecision{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ClaimFDLHumanDecision(ctx context.Context, runID, decisionID, operationID string) (FDLHumanDecision, error) {
+	var response FDLHumanDecision
+	if err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/decisions/%s/claim", runID, decisionID), map[string]string{"operation_id": operationID}, &response); err != nil {
+		return FDLHumanDecision{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CompleteFDLHumanDecision(ctx context.Context, runID, decisionID, operationID string) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/decisions/%s/complete", runID, decisionID), map[string]string{"operation_id": operationID}, nil)
 }
 
 // HeartbeatResponse, PendingUpdate, etc. alias the wire types so HTTP and WS

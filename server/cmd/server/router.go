@@ -806,6 +806,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/fdl-runs/{id}/tasks", h.CreateFDLAgentTaskForDaemon)
 		r.Post("/fdl-runs/{id}/tasks/{taskId}/activate", h.ActivateFDLAgentTaskForDaemon)
 		r.Post("/fdl-runs/{id}/projection", h.UpdateFDLIssueRunProjectionForDaemon)
+		r.Get("/fdl-runs/{id}/decisions/{actionId}", h.GetFDLHumanDecisionForDaemon)
+		r.Post("/fdl-runs/{id}/decisions/{decisionId}/claim", h.ClaimFDLHumanDecisionForDaemon)
+		r.Post("/fdl-runs/{id}/decisions/{decisionId}/complete", h.CompleteFDLHumanDecisionForDaemon)
 		r.Post("/fdl-runs/{id}/cancelled", h.CancelFDLIssueRunForDaemon)
 		r.Post("/fdl-runs/{id}/recovery", h.ReportFDLIssueRunRecoveryForDaemon)
 
@@ -1107,6 +1110,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
 					r.Get("/active-task", h.GetActiveTaskForIssue)
 					r.Get("/fdl-run", h.GetFDLIssueRun)
+					r.Post("/fdl-run/decisions", h.SubmitFDLHumanDecision)
 					r.Post("/tasks/{taskId}/cancel", h.CancelTask)
 					r.Post("/rerun", h.RerunIssue)
 					r.Get("/task-runs", h.ListTasksByIssue)

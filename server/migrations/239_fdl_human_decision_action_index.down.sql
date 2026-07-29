@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY fdl_human_decision_run_action_idx;

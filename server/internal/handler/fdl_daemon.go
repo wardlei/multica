@@ -152,11 +152,14 @@ func (h *Handler) InitializeFDLIssueRunForDaemon(w http.ResponseWriter, r *http.
 }
 
 type fdlProjectionRequest struct {
-	Status        string `json:"status"`
-	Phase         string `json:"phase"`
-	WaitingReason string `json:"waiting_reason,omitempty"`
-	Summary       string `json:"summary,omitempty"`
-	ActionType    string `json:"action_type,omitempty"`
+	Status           string   `json:"status"`
+	Phase            string   `json:"phase"`
+	WaitingReason    string   `json:"waiting_reason,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	ActionType       string   `json:"action_type,omitempty"`
+	DecisionActionID string   `json:"decision_action_id,omitempty"`
+	DecisionKind     string   `json:"decision_kind,omitempty"`
+	AllowedDecisions []string `json:"allowed_decisions,omitempty"`
 }
 
 var allowedFDLProjectionStatuses = map[string]struct{}{
@@ -169,14 +172,14 @@ var allowedFDLProjectionPhases = map[string]struct{}{
 	"gate": {}, "review": {}, "handoff": {}, "complete": {}, "cancelled": {},
 }
 
-func validateFDLProjectionRequest(req fdlProjectionRequest) (map[string]string, bool) {
+func validateFDLProjectionRequest(req fdlProjectionRequest) (map[string]any, bool) {
 	if _, ok := allowedFDLProjectionStatuses[req.Status]; !ok {
 		return nil, false
 	}
 	if _, ok := allowedFDLProjectionPhases[req.Phase]; !ok {
 		return nil, false
 	}
-	projection := make(map[string]string, 3)
+	projection := make(map[string]any, 6)
 	for key, value := range map[string]string{
 		"waiting_reason": req.WaitingReason,
 		"summary":        req.Summary,
@@ -190,7 +193,33 @@ func validateFDLProjectionRequest(req fdlProjectionRequest) (map[string]string, 
 			projection[key] = value
 		}
 	}
+	if req.DecisionActionID != "" || req.DecisionKind != "" || len(req.AllowedDecisions) > 0 {
+		if req.Status != "awaiting_human_decision" || len(req.DecisionActionID) > 256 || len(req.DecisionKind) > 80 || req.DecisionActionID == "" || req.DecisionKind == "" || !validFDLDecisionChoices(req.AllowedDecisions) {
+			return nil, false
+		}
+		projection["decision_action_id"] = req.DecisionActionID
+		projection["decision_kind"] = req.DecisionKind
+		projection["allowed_decisions"] = req.AllowedDecisions
+	}
 	return projection, true
+}
+
+func validFDLDecisionChoices(choices []string) bool {
+	if len(choices) == 0 || len(choices) > 5 {
+		return false
+	}
+	allowed := map[string]struct{}{"accept": {}, "reject": {}, "approve": {}, "retry": {}, "cancel": {}}
+	seen := make(map[string]struct{}, len(choices))
+	for _, choice := range choices {
+		if _, ok := allowed[choice]; !ok {
+			return false
+		}
+		if _, exists := seen[choice]; exists {
+			return false
+		}
+		seen[choice] = struct{}{}
+	}
+	return true
 }
 
 // UpdateFDLIssueRunProjectionForDaemon writes only a small, display-safe
@@ -237,6 +266,139 @@ func (h *Handler) UpdateFDLIssueRunProjectionForDaemon(w http.ResponseWriter, r 
 		return
 	}
 	writeJSON(w, http.StatusOK, fdlIssueRunToResponse(run))
+}
+
+type daemonFDLHumanDecisionResponse struct {
+	ID          string  `json:"id"`
+	ActionID    string  `json:"action_id"`
+	Decision    string  `json:"decision"`
+	Status      string  `json:"status"`
+	OperationID *string `json:"operation_id,omitempty"`
+}
+
+func daemonFDLHumanDecisionToResponse(decision db.FdlHumanDecision) daemonFDLHumanDecisionResponse {
+	return daemonFDLHumanDecisionResponse{
+		ID: uuidToString(decision.ID), ActionID: decision.ActionID, Decision: decision.Decision,
+		Status: decision.Status, OperationID: textToPtr(decision.OperationID),
+	}
+}
+
+// GetFDLHumanDecisionForDaemon returns only the current action-bound decision
+// receipt to the daemon that owns this run's frozen worktree.
+func (h *Handler) GetFDLHumanDecisionForDaemon(w http.ResponseWriter, r *http.Request) {
+	workspaceID, daemonID, ok := h.daemonFDLIdentity(w, r)
+	if !ok {
+		return
+	}
+	runID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "fdl_issue_run_id")
+	if !ok {
+		return
+	}
+	actionID := strings.TrimSpace(chi.URLParam(r, "actionId"))
+	if actionID == "" || len(actionID) > 256 {
+		writeError(w, http.StatusBadRequest, "valid FDL action_id is required")
+		return
+	}
+	decision, err := h.Queries.GetFDLHumanDecisionForDaemon(r.Context(), db.GetFDLHumanDecisionForDaemonParams{
+		WorkspaceID: workspaceID, FdlIssueRunID: runID, ActionID: actionID, DaemonID: daemonID,
+	})
+	if err == pgx.ErrNoRows {
+		writeError(w, http.StatusNotFound, "FDL decision is not pending")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load FDL decision failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, daemonFDLHumanDecisionToResponse(decision))
+}
+
+type claimFDLHumanDecisionRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
+func (h *Handler) ClaimFDLHumanDecisionForDaemon(w http.ResponseWriter, r *http.Request) {
+	workspaceID, daemonID, ok := h.daemonFDLIdentity(w, r)
+	if !ok {
+		return
+	}
+	runID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "fdl_issue_run_id")
+	if !ok {
+		return
+	}
+	decisionID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "decisionId"), "fdl_human_decision_id")
+	if !ok {
+		return
+	}
+	var request claimFDLHumanDecisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(strings.TrimSpace(request.OperationID)) == 0 || len(request.OperationID) > 256 {
+		writeError(w, http.StatusBadRequest, "valid FDL operation_id is required")
+		return
+	}
+	decision, err := h.Queries.ClaimFDLHumanDecisionForDaemon(r.Context(), db.ClaimFDLHumanDecisionForDaemonParams{
+		ID: decisionID, WorkspaceID: workspaceID, FdlIssueRunID: runID,
+		OperationID: pgtype.Text{String: strings.TrimSpace(request.OperationID), Valid: true}, DaemonID: daemonID,
+	})
+	if err == pgx.ErrNoRows {
+		existing, lookupErr := h.Queries.GetFDLHumanDecisionByIDForDaemon(r.Context(), db.GetFDLHumanDecisionByIDForDaemonParams{
+			ID: decisionID, WorkspaceID: workspaceID, FdlIssueRunID: runID, DaemonID: daemonID,
+		})
+		if lookupErr == nil && existing.Status == "processing" && existing.OperationID.Valid && existing.OperationID.String == strings.TrimSpace(request.OperationID) {
+			writeJSON(w, http.StatusOK, daemonFDLHumanDecisionToResponse(existing))
+			return
+		}
+		writeError(w, http.StatusConflict, "FDL decision cannot be claimed")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "claim FDL decision failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, daemonFDLHumanDecisionToResponse(decision))
+}
+
+type completeFDLHumanDecisionRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
+func (h *Handler) CompleteFDLHumanDecisionForDaemon(w http.ResponseWriter, r *http.Request) {
+	workspaceID, daemonID, ok := h.daemonFDLIdentity(w, r)
+	if !ok {
+		return
+	}
+	runID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "fdl_issue_run_id")
+	if !ok {
+		return
+	}
+	decisionID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "decisionId"), "fdl_human_decision_id")
+	if !ok {
+		return
+	}
+	var request completeFDLHumanDecisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(strings.TrimSpace(request.OperationID)) == 0 || len(request.OperationID) > 256 {
+		writeError(w, http.StatusBadRequest, "valid FDL operation_id is required")
+		return
+	}
+	decision, err := h.Queries.CompleteFDLHumanDecisionForDaemon(r.Context(), db.CompleteFDLHumanDecisionForDaemonParams{
+		ID: decisionID, WorkspaceID: workspaceID, FdlIssueRunID: runID,
+		OperationID: pgtype.Text{String: strings.TrimSpace(request.OperationID), Valid: true}, DaemonID: daemonID,
+	})
+	if err == pgx.ErrNoRows {
+		existing, lookupErr := h.Queries.GetFDLHumanDecisionByIDForDaemon(r.Context(), db.GetFDLHumanDecisionByIDForDaemonParams{
+			ID: decisionID, WorkspaceID: workspaceID, FdlIssueRunID: runID, DaemonID: daemonID,
+		})
+		if lookupErr == nil && existing.Status == "submitted" && existing.OperationID.Valid && existing.OperationID.String == strings.TrimSpace(request.OperationID) {
+			writeJSON(w, http.StatusOK, daemonFDLHumanDecisionToResponse(existing))
+			return
+		}
+		writeError(w, http.StatusConflict, "FDL decision cannot be completed")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "complete FDL decision failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, daemonFDLHumanDecisionToResponse(decision))
 }
 
 type fdlReasonRequest struct {

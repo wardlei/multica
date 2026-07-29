@@ -627,6 +627,10 @@
     "status": "Status",
     "phase": "Phase",
     "waiting_reason": "Waiting",
-    "unavailable": "The delivery projection is temporarily unavailable."
+    "unavailable": "The delivery projection is temporarily unavailable.",
+    "decision_required": "Decision required",
+    "decision_option": "{{decision}}",
+    "decision_submitted": "FDL decision recorded for the local executor.",
+    "decision_failed": "Failed to record FDL decision."
   }
 }
