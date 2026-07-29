@@ -20,6 +20,23 @@ type fdlExecutorWorktree struct {
 	LocalPath     string `json:"local_path"`
 }
 
+// fdlIssueInput is the narrowly scoped requirements seed owned by Multica.
+// It deliberately excludes issue links, project identifiers, and every FDL
+// transport binding before an Agent receives the private prompt projection.
+type fdlIssueInput struct {
+	SchemaVersion int    `json:"schema_version"`
+	Title         string `json:"title"`
+	Description   string `json:"description"`
+	Priority      string `json:"priority"`
+}
+
+const (
+	fdlIssueInputTitleMaxRunes       = 500
+	fdlIssueInputDescriptionMaxRunes = 12000
+	fdlIssueInputPriorityMaxRunes    = 64
+	fdlIssueInputMaxBytes            = 12500
+)
+
 type fdlEvidenceReference struct {
 	Path          string `json:"path"`
 	SHA256        string `json:"sha256"`
@@ -83,6 +100,88 @@ func (d *Daemon) readFDLExecutorWorktree(runID string) (fdlExecutorWorktree, err
 		return fdlExecutorWorktree{}, fmt.Errorf("validate frozen FDL source worktree: %w", err)
 	}
 	return worktree, nil
+}
+
+func (d *Daemon) persistFDLIssueInput(runID string, raw json.RawMessage) error {
+	if err := os.MkdirAll(d.fdlExecutorStateDir(runID), 0o700); err != nil {
+		return fmt.Errorf("create FDL executor state directory: %w", err)
+	}
+	var snapshot map[string]json.RawMessage
+	if json.Unmarshal(raw, &snapshot) != nil {
+		return fmt.Errorf("decode frozen FDL Issue input")
+	}
+	decodeString := func(name string, maxRunes int) (string, error) {
+		value, ok := snapshot[name]
+		if !ok {
+			return "", nil
+		}
+		var decoded string
+		if json.Unmarshal(value, &decoded) != nil {
+			return "", fmt.Errorf("frozen FDL Issue %s is invalid", name)
+		}
+		decoded = strings.TrimSpace(decoded)
+		if len([]rune(decoded)) > maxRunes {
+			return "", fmt.Errorf("frozen FDL Issue %s exceeds its limit", name)
+		}
+		return decoded, nil
+	}
+	title, err := decodeString("title", fdlIssueInputTitleMaxRunes)
+	if err != nil {
+		return err
+	}
+	if title == "" {
+		return fmt.Errorf("frozen FDL Issue title is required")
+	}
+	description, err := decodeString("description", fdlIssueInputDescriptionMaxRunes)
+	if err != nil {
+		return err
+	}
+	priority, err := decodeString("priority", fdlIssueInputPriorityMaxRunes)
+	if err != nil {
+		return err
+	}
+	input := fdlIssueInput{SchemaVersion: 1, Title: title, Description: description, Priority: priority}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("encode frozen FDL Issue input: %w", err)
+	}
+	if len(encoded) > fdlIssueInputMaxBytes {
+		return fmt.Errorf("frozen FDL Issue input exceeds its byte limit")
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "issue-input.json"), input); err != nil {
+		return fmt.Errorf("persist frozen FDL Issue input: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) readFDLIssueInput(runID string) (fdlIssueInput, error) {
+	var input fdlIssueInput
+	found, err := readFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "issue-input.json"), &input)
+	if err != nil || !found || input.SchemaVersion != 1 || strings.TrimSpace(input.Title) == "" ||
+		len([]rune(input.Title)) > fdlIssueInputTitleMaxRunes ||
+		len([]rune(input.Description)) > fdlIssueInputDescriptionMaxRunes ||
+		len([]rune(input.Priority)) > fdlIssueInputPriorityMaxRunes {
+		return fdlIssueInput{}, fmt.Errorf("frozen FDL Issue input is unavailable")
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil || len(encoded) > fdlIssueInputMaxBytes {
+		return fdlIssueInput{}, fmt.Errorf("frozen FDL Issue input is invalid")
+	}
+	return input, nil
+}
+
+// ensureFDLIssueInput backfills the executor-private projection for a run
+// started before this field was introduced. A malformed existing file is never
+// overwritten: it is a local integrity failure and must stop dispatch.
+func (d *Daemon) ensureFDLIssueInput(run PendingFDLIssueRun) error {
+	path := filepath.Join(d.fdlExecutorStateDir(run.ID), "issue-input.json")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return d.persistFDLIssueInput(run.ID, run.IssueSnapshot)
+	} else if err != nil {
+		return fmt.Errorf("inspect frozen FDL Issue input: %w", err)
+	}
+	_, err := d.readFDLIssueInput(run.ID)
+	return err
 }
 
 func (d *Daemon) fdlIsolatedWorkspacePath(runID, workItemID string) (string, error) {

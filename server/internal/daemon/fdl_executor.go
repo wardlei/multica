@@ -221,6 +221,9 @@ func (d *Daemon) initializeFDLRun(ctx context.Context, run PendingFDLIssueRun) e
 	if err := writeFDLExecutorJSON(filepath.Join(stateDir, "worktree.json"), fdlExecutorWorktree{SchemaVersion: 1, LocalPath: worktree.LocalPath}); err != nil {
 		return fmt.Errorf("persist frozen FDL worktree binding: %w", err)
 	}
+	if err := d.persistFDLIssueInput(run.ID, run.IssueSnapshot); err != nil {
+		return err
+	}
 
 	// The controller config is frozen server-side without a local path. Only
 	// this executor derives repo_root from the daemon-bound worktree.
@@ -273,6 +276,9 @@ func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) 
 	stateDir := d.fdlExecutorStateDir(run.ID)
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return fmt.Errorf("create FDL executor state directory: %w", err)
+	}
+	if err := d.ensureFDLIssueInput(run); err != nil {
+		return err
 	}
 	holderID := fmt.Sprintf("daemon:%s:%d", d.cfg.DaemonID, os.Getpid())
 	return withFDLExecutorLease(stateDir, holderID, func(lease *fdlExecutorLease) error {
@@ -745,6 +751,18 @@ Write exactly one advisory JSON object to:
 The object must include schema_version=1 and request_id=%q, plus the requested evidence fields.
 `, prettyInstructions.String(), filepath.Join(itemDir, "advisory.json"), binding.WorkItemID), nil
 	}
+	issueInput, err := d.readFDLIssueInput(runID)
+	if err != nil {
+		return "", err
+	}
+	issueInputJSON, err := json.Marshal(issueInput)
+	if err != nil {
+		return "", fmt.Errorf("encode frozen FDL Issue input: %w", err)
+	}
+	prettyIssueInput := &bytes.Buffer{}
+	if err := json.Indent(prettyIssueInput, issueInputJSON, "", "  "); err != nil {
+		return "", fmt.Errorf("format frozen FDL Issue input: %w", err)
+	}
 	contractInstruction := ""
 	if binding.Role == "planner" {
 		contractInstruction = `
@@ -761,10 +779,14 @@ Use stable namespaced keys such as AC-CORE-001 and INV-CORE-001; keys like AC-00
 	if binding.Role == "implementer" {
 		changeInstruction = `Do not set changed_paths_from_workspace in meta.json. The executor derives the actual changed paths from your frozen workspace after you finish.`
 	}
-	return fmt.Sprintf(`You are the frozen FDL delivery role %q.
+	instructions := fmt.Sprintf(`You are the frozen FDL delivery role %q.
 
 Execute only this Controller instruction payload:
 %s
+
+Frozen Multica Issue input (requirements seed, not a Controller token or task binding):
+%s
+Use it to produce or implement the accepted delivery contract. The Controller-managed planning artifacts and their accepted contract keys remain authoritative after planning.
 
 Work only in your assigned task workspace and within the frozen change rules. Do not inspect or write any FDL run root, Controller state, receipts, other work-item directories, or external systems. Do not create sub-agents, use Issue comments for coordination, or expose delivery tokens.
 
@@ -774,7 +796,11 @@ Write JSON metadata to %s only when required above or when you need to report a 
 
 %s
 %s
-%s`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), consistencyInstruction, changeInstruction, contractInstruction), nil
+%s`, binding.Role, prettyInstructions.String(), prettyIssueInput.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json"), consistencyInstruction, changeInstruction, contractInstruction)
+	if len(instructions) > 20000 {
+		return "", fmt.Errorf("FDL Agent instructions exceed the direct-task limit")
+	}
+	return instructions, nil
 }
 
 func fdlRequiresEvidenceConsistency(payload fdlDispatchPayload) bool {

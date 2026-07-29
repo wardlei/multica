@@ -116,6 +116,9 @@ func TestReadFDLRoleMetaAllowsReviewerFindingResolutions(t *testing.T) {
 
 func TestFDLAgentInstructionsRequireConsistencyForContextPackConsumers(t *testing.T) {
 	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"title":"Set the expected value","description":"Implement the frozen requirement.","priority":"high","project_id":"not-projected"}`)); err != nil {
+		t.Fatalf("persist issue input: %v", err)
+	}
 	payload := fdlDispatchPayload{Instructions: json.RawMessage(`{"task":"implement"}`), InputHashes: map[string]string{"context_pack_hash": "sha256:pack"}}
 	payload.Attempt.Role = "feature-delivery-implementer"
 	payload.Attempt.Phase = "implementation"
@@ -125,6 +128,56 @@ func TestFDLAgentInstructionsRequireConsistencyForContextPackConsumers(t *testin
 	}
 	if !strings.Contains(instructions, "MUST write meta.json") || !strings.Contains(instructions, "never use not_applicable") {
 		t.Fatalf("Context Pack consistency requirement missing from instructions: %s", instructions)
+	}
+	if !strings.Contains(instructions, "Set the expected value") || strings.Contains(instructions, "not-projected") {
+		t.Fatalf("frozen Issue requirements seed was not safely projected: %s", instructions)
+	}
+}
+
+func TestPersistFDLIssueInputRejectsMissingOrOversizedTitle(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"description":"missing title"}`)); err == nil {
+		t.Fatal("missing title was accepted")
+	}
+	tooLong := strings.Repeat("x", fdlIssueInputTitleMaxRunes+1)
+	raw, err := json.Marshal(map[string]string{"title": tooLong})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistFDLIssueInput("run", raw); err == nil {
+		t.Fatal("oversized title was accepted")
+	}
+}
+
+func TestPersistFDLIssueInputDropsUnapprovedFields(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	if err := d.persistFDLIssueInput("run", json.RawMessage(`{"title":"Keep this","description":"Only requirements survive.","priority":"normal","token":"must-not-persist","local_path":"/private/path"}`)); err != nil {
+		t.Fatalf("persist issue input: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(d.fdlExecutorStateDir("run"), "issue-input.json"))
+	if err != nil {
+		t.Fatalf("read persisted issue input: %v", err)
+	}
+	if strings.Contains(string(data), "must-not-persist") || strings.Contains(string(data), "/private/path") {
+		t.Fatalf("private snapshot fields leaked into issue input: %s", data)
+	}
+}
+
+func TestEnsureFDLIssueInputBackfillsOnlyWhenMissing(t *testing.T) {
+	d := &Daemon{cfg: Config{FDLRunRoot: t.TempDir()}}
+	run := PendingFDLIssueRun{ID: "run", IssueSnapshot: json.RawMessage(`{"title":"Backfill requirements","description":"Frozen.","priority":"normal"}`)}
+	if err := d.ensureFDLIssueInput(run); err != nil {
+		t.Fatalf("backfill missing issue input: %v", err)
+	}
+	if _, err := d.readFDLIssueInput(run.ID); err != nil {
+		t.Fatalf("read backfilled issue input: %v", err)
+	}
+	path := filepath.Join(d.fdlExecutorStateDir(run.ID), "issue-input.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"title":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ensureFDLIssueInput(run); err == nil {
+		t.Fatal("malformed existing issue input was overwritten")
 	}
 }
 
