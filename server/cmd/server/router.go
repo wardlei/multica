@@ -797,6 +797,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/workspaces/{workspaceId}/runtime-profiles", h.DaemonListRuntimeProfiles)
 		r.Post("/code-worktree-inspections/{id}/complete", h.CompleteCodeWorktreeInspection)
 
+		// FDL runs are intentionally daemon-authenticated. The local executor
+		// receives frozen launch inputs only for the daemon bound to the Issue's
+		// worktree; ordinary workspace APIs expose a safe status projection only.
+		r.Get("/fdl-runs/pending", h.ListPendingFDLIssueRunsForDaemon)
+		r.Get("/fdl-runs/active", h.ListActiveFDLIssueRunsForDaemon)
+		r.Post("/fdl-runs/{id}/initialize", h.InitializeFDLIssueRunForDaemon)
+		r.Post("/fdl-runs/{id}/tasks", h.CreateFDLAgentTaskForDaemon)
+		r.Post("/fdl-runs/{id}/tasks/{taskId}/activate", h.ActivateFDLAgentTaskForDaemon)
+		r.Post("/fdl-runs/{id}/projection", h.UpdateFDLIssueRunProjectionForDaemon)
+		r.Post("/fdl-runs/{id}/cancelled", h.CancelFDLIssueRunForDaemon)
+		r.Post("/fdl-runs/{id}/recovery", h.ReportFDLIssueRunRecoveryForDaemon)
+
 		r.Post("/runtimes/{runtimeId}/tasks/claim", h.ClaimTaskByRuntime)
 		// Canonical machine-level batch claim (MUL-4257). `/claim` is a
 		// transitional alias; the daemon coordinator targets the canonical
@@ -1094,6 +1106,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/subscribe", h.SubscribeToIssue)
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
 					r.Get("/active-task", h.GetActiveTaskForIssue)
+					r.Get("/fdl-run", h.GetFDLIssueRun)
 					r.Post("/tasks/{taskId}/cancel", h.CancelTask)
 					r.Post("/rerun", h.RerunIssue)
 					r.Get("/task-runs", h.ListTasksByIssue)
@@ -1182,6 +1195,16 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Squad leader evaluation (writes to activity_log)
 			r.Post("/api/issues/{id}/squad-evaluated", h.RecordSquadLeaderEvaluation)
+
+			// FDL delivery profiles are mutable workspace templates. An issue
+			// snapshots one at creation, so these routes never alter active runs.
+			r.Route("/api/fdl-delivery-profiles", func(r chi.Router) {
+				r.Get("/", h.ListFDLDeliveryProfiles)
+				r.Post("/", h.CreateFDLDeliveryProfile)
+				r.Get("/{id}", h.GetFDLDeliveryProfile)
+				r.Put("/{id}", h.UpdateFDLDeliveryProfile)
+				r.Delete("/{id}", h.ArchiveFDLDeliveryProfile)
+			})
 
 			// Autopilots
 			r.Route("/api/autopilots", func(r chi.Router) {

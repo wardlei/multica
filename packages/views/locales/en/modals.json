@@ -181,6 +181,11 @@
     "set_project": "Set project...",
     "customize_fields": "Customize fields...",
     "custom_properties": "Custom properties",
+    "fdl": {
+      "aria": "Select delivery mode",
+      "squad_mode": "Squad collaboration",
+      "project_required": "FDL delivery requires a project with a clean code worktree."
+    },
     "remove_parent": "Remove parent",
     "set_parent_picker": {
       "title": "Set parent issue",

@@ -179,6 +179,11 @@
     "set_project": "设置项目...",
     "customize_fields": "自定义字段...",
     "custom_properties": "自定义属性",
+    "fdl": {
+      "aria": "选择交付模式",
+      "squad_mode": "小队协作",
+      "project_required": "FDL 交付需要选择一个绑定了干净代码 worktree 的项目。"
+    },
     "remove_parent": "移除父级",
     "set_parent_picker": {
       "title": "设置父 issue",

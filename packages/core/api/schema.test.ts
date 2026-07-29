@@ -91,6 +91,20 @@ describe("ApiClient schema fallback", () => {
     });
   });
 
+  describe("FDL Delivery API", () => {
+    it("falls back to an empty profile list when a backend returns a malformed payload", async () => {
+      stubFetchJson({ profiles: "not-an-array" });
+      const client = new ApiClient("https://api.example.test");
+      await expect(client.listFDLDeliveryProfiles()).resolves.toEqual([]);
+    });
+
+    it("rejects an unusable FDL run projection instead of fabricating a delivery state", async () => {
+      stubFetchJson({ issue_id: "issue-1", status: "running" });
+      const client = new ApiClient("https://api.example.test");
+      await expect(client.getFDLIssueRun("issue-1")).rejects.toThrow("invalid FDL Issue run response");
+    });
+  });
+
   describe("createIssue", () => {
     // The create modal decides whether to run its label-attach fallback by
     // reading `labels` off the parsed response, and treats a rejection as a

@@ -1,0 +1,1246 @@
+package daemon
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+	"unicode/utf16"
+)
+
+const fdlExecutorLeaseTTL = 2 * time.Minute
+
+type fdlExecutorLease struct {
+	SchemaVersion int       `json:"schema_version"`
+	HolderID      string    `json:"holder_id"`
+	ActionID      string    `json:"action_id,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at"`
+}
+
+// fdlExecutorMailbox is executor-private. Envelope data can contain
+// submission tokens, so it lives outside both the repository and run root.
+type fdlExecutorMailbox struct {
+	SchemaVersion int             `json:"schema_version"`
+	FDLRunID      string          `json:"fdl_run_id"`
+	ActionID      string          `json:"action_id"`
+	ActionKind    string          `json:"action_kind"`
+	Envelope      json.RawMessage `json:"envelope"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+// fdlWorkItemBinding is the local-only bridge from a Controller item to one
+// Multica task. Its token must never appear in any task request, database row,
+// comment, or Agent prompt.
+type fdlWorkItemBinding struct {
+	SchemaVersion       int       `json:"schema_version"`
+	FDLRunID            string    `json:"fdl_run_id"`
+	ActionID            string    `json:"action_id"`
+	ExternalWorkID      string    `json:"external_work_id"`
+	WorkItemID          string    `json:"work_item_id"`
+	SubmissionToken     string    `json:"submission_token"`
+	DispatchSHA256      string    `json:"dispatch_sha256"`
+	DispatchKey         string    `json:"dispatch_key"`
+	Role                string    `json:"role"`
+	TaskID              string    `json:"task_id,omitempty"`
+	State               string    `json:"state"`
+	DispatchError       string    `json:"dispatch_error,omitempty"`
+	TerminalOperationID string    `json:"terminal_operation_id,omitempty"`
+	TerminalSubmitted   bool      `json:"terminal_submitted,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// fdlDispatchReceipt makes Controller acknowledgement and task activation one
+// recoverable local transaction. It is deliberately outside the FDL run root:
+// the Controller owns that root, while this receipt only records executor work.
+type fdlDispatchReceipt struct {
+	SchemaVersion          int               `json:"schema_version"`
+	FDLRunID               string            `json:"fdl_run_id"`
+	ActionID               string            `json:"action_id"`
+	ExternalWorkID         string            `json:"external_work_id"`
+	AckOperationID         string            `json:"ack_operation_id"`
+	TaskIDs                map[string]string `json:"task_ids"`
+	DispatchFailures       map[string]string `json:"dispatch_failures,omitempty"`
+	ControllerAcknowledged bool              `json:"controller_acknowledged"`
+	ReturnedEnvelope       json.RawMessage   `json:"returned_envelope,omitempty"`
+	Activated              map[string]bool   `json:"activated"`
+	UpdatedAt              time.Time         `json:"updated_at"`
+}
+
+type fdlCancellationReceipt struct {
+	SchemaVersion int       `json:"schema_version"`
+	FDLRunID      string    `json:"fdl_run_id"`
+	OperationID   string    `json:"operation_id"`
+	Terminated    bool      `json:"terminated"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// fdlExecutorLoop owns the local side of a frozen Controller run. It never
+// derives work from comments or legacy Squad leader behavior.
+func (d *Daemon) fdlExecutorLoop(ctx context.Context) {
+	ticker := time.NewTicker(d.cfg.FDLPollInterval)
+	defer ticker.Stop()
+	for {
+		d.runFDLExecutorCycle(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *Daemon) runFDLExecutorCycle(ctx context.Context) {
+	runs, err := d.client.ListPendingFDLIssueRuns(ctx)
+	if err != nil {
+		d.logger.Warn("FDL pending run poll failed", "error", err)
+		return
+	}
+	for _, run := range runs {
+		if err := d.initializeFDLRun(ctx, run); err != nil {
+			d.logger.Warn("FDL run initialization failed", "fdl_issue_run_id", run.ID, "issue_id", run.IssueID, "error", err)
+			if reportErr := d.client.ReportFDLIssueRunRecovery(ctx, run.ID, "executor initialization failed: "+boundedFDLError(err)); reportErr != nil {
+				d.logger.Warn("FDL recovery projection failed", "fdl_issue_run_id", run.ID, "error", reportErr)
+			}
+		}
+	}
+	active, err := d.client.ListActiveFDLIssueRuns(ctx)
+	if err != nil {
+		d.logger.Warn("FDL active run poll failed", "error", err)
+		return
+	}
+	for _, run := range active {
+		if err := d.refreshFDLMailbox(ctx, run); err != nil {
+			d.logger.Warn("FDL mailbox refresh failed", "fdl_issue_run_id", run.ID, "issue_id", run.IssueID, "error", err)
+		}
+	}
+}
+
+func (d *Daemon) initializeFDLRun(ctx context.Context, run PendingFDLIssueRun) error {
+	if err := os.MkdirAll(d.cfg.FDLRunRoot, 0o700); err != nil {
+		return fmt.Errorf("create FDL run root: %w", err)
+	}
+	var profile struct {
+		ControllerConfig map[string]any `json:"controller_config"`
+	}
+	if err := json.Unmarshal(run.ProfileSnapshot, &profile); err != nil || profile.ControllerConfig == nil {
+		return fmt.Errorf("decode frozen controller config")
+	}
+	var worktree struct {
+		LocalPath string `json:"local_path"`
+	}
+	if err := json.Unmarshal(run.WorktreeSnapshot, &worktree); err != nil || !filepath.IsAbs(worktree.LocalPath) {
+		return fmt.Errorf("decode frozen worktree path")
+	}
+	if !isFDLExternalRoot(d.cfg.FDLRunRoot, worktree.LocalPath) {
+		return fmt.Errorf("FDL run root must be outside the frozen worktree")
+	}
+
+	// The controller config is frozen server-side without a local path. Only
+	// this executor derives repo_root from the daemon-bound worktree.
+	config := make(map[string]any, len(profile.ControllerConfig)+1)
+	for key, value := range profile.ControllerConfig {
+		config[key] = value
+	}
+	config["repo_root"] = worktree.LocalPath
+	privateState := filepath.Join(filepath.Dir(d.cfg.FDLRunRoot), ".multica-fdl-executor")
+	if err := os.MkdirAll(privateState, 0o700); err != nil {
+		return fmt.Errorf("create FDL executor state directory: %w", err)
+	}
+	configPath := filepath.Join(privateState, run.ID+".config.json")
+	configBytes, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("serialize frozen controller config: %w", err)
+	}
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		return fmt.Errorf("write private FDL config: %w", err)
+	}
+	runRoot := filepath.Join(d.cfg.FDLRunRoot, run.ID)
+	if err := d.runFDLCommand(ctx, "validate-config", "--config", configPath); err != nil {
+		return err
+	}
+	fdlRunID, err := d.readOrInitializeFDLRun(ctx, runRoot, configPath)
+	if err != nil {
+		return err
+	}
+	if err := d.runFDLCommand(ctx, "preflight-run", "--run-root", runRoot); err != nil {
+		return err
+	}
+	if err := d.client.InitializeFDLIssueRun(ctx, run.ID, fdlRunID); err != nil {
+		return fmt.Errorf("bind initialized FDL run: %w", err)
+	}
+	return d.refreshFDLMailbox(ctx, PendingFDLIssueRun{
+		ID: run.ID, IssueID: run.IssueID, FDLRunID: &fdlRunID, Status: "running", Phase: "setup",
+	})
+}
+
+// refreshFDLMailbox holds a local filesystem lease while it reads the current
+// Controller action. It never derives an action from history, and it does not
+// issue a second drive while an action is already durable in the mailbox.
+func (d *Daemon) refreshFDLMailbox(ctx context.Context, run PendingFDLIssueRun) error {
+	if run.Status == "cancelling" && (run.FDLRunID == nil || strings.TrimSpace(*run.FDLRunID) == "") {
+		return d.client.CancelFDLIssueRun(ctx, run.ID, "Issue cancelled before FDL Controller initialization")
+	}
+	if run.FDLRunID == nil || strings.TrimSpace(*run.FDLRunID) == "" {
+		return fmt.Errorf("active FDL run has no external run ID")
+	}
+	stateDir := d.fdlExecutorStateDir(run.ID)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("create FDL executor state directory: %w", err)
+	}
+	holderID := fmt.Sprintf("daemon:%s:%d", d.cfg.DaemonID, os.Getpid())
+	return withFDLExecutorLease(stateDir, holderID, func(lease *fdlExecutorLease) error {
+		if run.Status == "cancelling" {
+			return d.terminateFDLRun(ctx, run)
+		}
+		mailbox, err := readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
+		if err != nil {
+			return err
+		}
+		if err := d.recoverFDLDispatchReceipt(ctx, run.ID, mailbox); err != nil {
+			return err
+		}
+		// Receipt recovery can atomically replace the mailbox after the last
+		// activation. Re-read it before deciding whether a Controller drive is due.
+		mailbox, err = readFDLExecutorMailbox(filepath.Join(stateDir, "executor.mailbox"))
+		if err != nil {
+			return err
+		}
+		if mailbox != nil && mailbox.FDLRunID == *run.FDLRunID && mailbox.ActionID != "" {
+			if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
+				if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
+					return err
+				}
+			}
+			return d.collectFDLTaskResults(ctx, run.ID, *run.FDLRunID)
+		}
+		runRoot := filepath.Join(d.cfg.FDLRunRoot, run.ID)
+		operationID, err := newFDLOperationID()
+		if err != nil {
+			return err
+		}
+		output, err := d.runFDLCommandOutput(ctx, "drive-run", "--run-root", runRoot, "--operation-id", operationID)
+		if err != nil {
+			return err
+		}
+		var envelope struct {
+			RunID      string `json:"run_id"`
+			NextAction struct {
+				ActionID string `json:"action_id"`
+				Kind     string `json:"kind"`
+			} `json:"next_action"`
+		}
+		if err := json.Unmarshal(output, &envelope); err != nil || envelope.RunID != *run.FDLRunID || envelope.NextAction.ActionID == "" || envelope.NextAction.Kind == "" {
+			return fmt.Errorf("decode current FDL Controller envelope")
+		}
+		mailbox = &fdlExecutorMailbox{
+			SchemaVersion: 1, FDLRunID: envelope.RunID, ActionID: envelope.NextAction.ActionID,
+			ActionKind: envelope.NextAction.Kind, Envelope: output, UpdatedAt: time.Now().UTC(),
+		}
+		if err := writeFDLExecutorJSON(filepath.Join(stateDir, "executor.mailbox"), mailbox); err != nil {
+			return err
+		}
+		lease.ActionID = mailbox.ActionID
+		if err := writeFDLExecutorJSON(filepath.Join(stateDir, "executor.lease"), lease); err != nil {
+			return err
+		}
+		if strings.HasPrefix(mailbox.ActionKind, "dispatch_") {
+			if err := d.dispatchFDLMailbox(ctx, run.ID, mailbox); err != nil {
+				return err
+			}
+		}
+		if err := d.collectFDLTaskResults(ctx, run.ID, *run.FDLRunID); err != nil {
+			return err
+		}
+		return d.client.UpdateFDLIssueRunProjection(ctx, run.ID, "running", fdlProjectionPhase(run.Phase), "", "Controller action is held by the local executor", mailbox.ActionKind)
+	})
+}
+
+// terminateFDLRun is the reverse half of the FDL boundary. The server has
+// already cancelled direct Agent tasks; this durable receipt ensures the local
+// Controller receives exactly one replay-safe terminal command after restart.
+func (d *Daemon) terminateFDLRun(ctx context.Context, run PendingFDLIssueRun) error {
+	if run.FDLRunID == nil || *run.FDLRunID == "" {
+		return fmt.Errorf("cancelling FDL run has no Controller run ID")
+	}
+	stateDir := d.fdlExecutorStateDir(run.ID)
+	receiptPath := filepath.Join(stateDir, "cancellation-receipt.json")
+	var receipt fdlCancellationReceipt
+	found, err := readFDLExecutorJSON(receiptPath, &receipt)
+	if err != nil {
+		return err
+	}
+	if found && (receipt.SchemaVersion != 1 || receipt.FDLRunID != *run.FDLRunID || receipt.OperationID == "") {
+		return fmt.Errorf("FDL cancellation receipt conflicts with run")
+	}
+	if !found {
+		op, err := newFDLOperationID()
+		if err != nil {
+			return err
+		}
+		receipt = fdlCancellationReceipt{SchemaVersion: 1, FDLRunID: *run.FDLRunID, OperationID: op, UpdatedAt: time.Now().UTC()}
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	if !receipt.Terminated {
+		if err := d.runFDLCommand(ctx, "terminate-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, run.ID), "--status", "cancelled", "--reason", "Issue cancelled in Multica", "--operation-id", receipt.OperationID); err != nil {
+			return fmt.Errorf("terminate FDL Controller run: %w", err)
+		}
+		receipt.Terminated = true
+		receipt.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	return d.client.CancelFDLIssueRun(ctx, run.ID, "Issue cancelled; Controller terminated and direct tasks cancelled")
+}
+
+func (d *Daemon) readOrInitializeFDLRun(ctx context.Context, runRoot, configPath string) (string, error) {
+	statePath := filepath.Join(runRoot, "state.json")
+	if raw, err := os.ReadFile(statePath); err == nil {
+		var state struct {
+			RunID string `json:"run_id"`
+		}
+		if json.Unmarshal(raw, &state) == nil && state.RunID != "" {
+			return state.RunID, nil
+		}
+		return "", fmt.Errorf("existing FDL run state has no run_id")
+	}
+	output, err := d.runFDLCommandOutput(ctx, "init-run", "--config", configPath, "--run-root", runRoot)
+	if err != nil {
+		return "", err
+	}
+	var initialized struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(output, &initialized); err != nil || initialized.RunID == "" {
+		return "", fmt.Errorf("read FDL init result")
+	}
+	return initialized.RunID, nil
+}
+
+func (d *Daemon) runFDLCommand(ctx context.Context, args ...string) error {
+	_, err := d.runFDLCommandOutput(ctx, args...)
+	return err
+}
+
+func (d *Daemon) runFDLCommandOutput(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, d.cfg.FDLCLIPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("FDL %s: %w: %s", args[0], err, boundedFDLErrorText(string(output)))
+	}
+	return output, nil
+}
+
+func isFDLExternalRoot(runRoot, repoRoot string) bool {
+	fromRepo, err := filepath.Rel(repoRoot, runRoot)
+	if err != nil || (fromRepo != ".." && !strings.HasPrefix(fromRepo, ".."+string(filepath.Separator))) {
+		return false
+	}
+	fromRun, err := filepath.Rel(runRoot, repoRoot)
+	return err == nil && (fromRun == ".." || strings.HasPrefix(fromRun, ".."+string(filepath.Separator)))
+}
+
+func (d *Daemon) fdlExecutorStateDir(runID string) string {
+	return filepath.Join(filepath.Dir(d.cfg.FDLRunRoot), ".multica-fdl-executor", "runs", runID)
+}
+
+func withFDLExecutorLease(stateDir, holderID string, fn func(*fdlExecutorLease) error) error {
+	lockPath := filepath.Join(stateDir, "executor.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open FDL executor lock: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("FDL executor is already active")
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	leasePath := filepath.Join(stateDir, "executor.lease")
+	lease := &fdlExecutorLease{SchemaVersion: 1, HolderID: holderID, ExpiresAt: time.Now().UTC().Add(fdlExecutorLeaseTTL)}
+	if existing, err := readFDLExecutorLease(leasePath); err != nil {
+		return err
+	} else if existing != nil && existing.ExpiresAt.After(time.Now().UTC()) && existing.HolderID != holderID {
+		return fmt.Errorf("FDL executor lease belongs to another holder")
+	} else if existing != nil {
+		lease = existing
+		lease.HolderID = holderID
+		lease.ExpiresAt = time.Now().UTC().Add(fdlExecutorLeaseTTL)
+	}
+	if err := writeFDLExecutorJSON(leasePath, lease); err != nil {
+		return err
+	}
+	return fn(lease)
+}
+
+func readFDLExecutorLease(path string) (*fdlExecutorLease, error) {
+	var lease fdlExecutorLease
+	found, err := readFDLExecutorJSON(path, &lease)
+	if err != nil || !found {
+		return nil, err
+	}
+	if lease.SchemaVersion != 1 || lease.HolderID == "" || lease.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("invalid FDL executor lease")
+	}
+	return &lease, nil
+}
+
+func readFDLExecutorMailbox(path string) (*fdlExecutorMailbox, error) {
+	var mailbox fdlExecutorMailbox
+	found, err := readFDLExecutorJSON(path, &mailbox)
+	if err != nil || !found {
+		return nil, err
+	}
+	if mailbox.SchemaVersion != 1 || mailbox.FDLRunID == "" || mailbox.ActionID == "" || mailbox.ActionKind == "" || len(mailbox.Envelope) == 0 {
+		return nil, fmt.Errorf("invalid FDL executor mailbox")
+	}
+	return &mailbox, nil
+}
+
+func readFDLExecutorJSON(path string, value any) (bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read FDL executor state: %w", err)
+	}
+	if err := json.Unmarshal(data, value); err != nil {
+		return false, fmt.Errorf("decode FDL executor state: %w", err)
+	}
+	return true, nil
+}
+
+func writeFDLExecutorJSON(path string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode FDL executor state: %w", err)
+	}
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
+		return fmt.Errorf("write FDL executor state: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("commit FDL executor state: %w", err)
+	}
+	return nil
+}
+
+func newFDLOperationID() (string, error) {
+	var random [12]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate FDL operation ID: %w", err)
+	}
+	return fmt.Sprintf("multica-%x", random), nil
+}
+
+func fdlProjectionPhase(phase string) string {
+	switch phase {
+	case "intake", "pre_design", "design", "implementation", "review", "handoff":
+		return phase
+	default:
+		return "setup"
+	}
+}
+
+type fdlDispatchEnvelope struct {
+	RunID      string `json:"run_id"`
+	NextAction struct {
+		ActionID       string `json:"action_id"`
+		Kind           string `json:"kind"`
+		ExternalWorkID string `json:"external_work_id"`
+		WorkItems      []struct {
+			WorkItemID      string `json:"work_item_id"`
+			SubmissionToken string `json:"submission_token"`
+			Dispatch        struct {
+				Path   string `json:"path"`
+				SHA256 string `json:"sha256"`
+			} `json:"dispatch"`
+		} `json:"work_items"`
+	} `json:"next_action"`
+}
+
+type fdlDispatchPayload struct {
+	Attempt struct {
+		Role  string `json:"role"`
+		Phase string `json:"phase"`
+	} `json:"attempt"`
+	Instructions json.RawMessage `json:"instructions"`
+}
+
+// dispatchFDLMailbox is the durable bridge for one Controller dispatch action:
+// all local task rows are created before the one batch acknowledgement, and no
+// task becomes claimable before that acknowledgement is durably accepted.
+func (d *Daemon) dispatchFDLMailbox(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+	bindings, err := d.materializeFDLDispatch(runID, mailbox)
+	if err != nil {
+		return err
+	}
+	if err := d.createFDLDispatchTasks(ctx, runID, bindings); err != nil {
+		return err
+	}
+	return d.acknowledgeAndActivateFDLDispatch(ctx, runID, mailbox)
+}
+
+func (d *Daemon) fdlBindingPath(runID, workItemID string) string {
+	return filepath.Join(d.fdlExecutorStateDir(runID), "work-items", workItemID, "binding.json")
+}
+
+func (d *Daemon) readFDLDispatchPayload(runID, workItemID string) (fdlDispatchPayload, error) {
+	var payload fdlDispatchPayload
+	data, err := os.ReadFile(filepath.Join(d.fdlExecutorStateDir(runID), "work-items", workItemID, "dispatch.json"))
+	if err != nil {
+		return payload, fmt.Errorf("read private FDL dispatch: %w", err)
+	}
+	if err := json.Unmarshal(data, &payload); err != nil || payload.Attempt.Role == "" {
+		return payload, fmt.Errorf("decode private FDL dispatch")
+	}
+	return payload, nil
+}
+
+// fdlProfileRole translates Controller role names and isolated review lanes to
+// the frozen Delivery Profile vocabulary. Unknown roles fail closed rather than
+// accidentally invoking a nearby but incorrect Agent.
+func fdlProfileRole(payload fdlDispatchPayload) (string, error) {
+	switch payload.Attempt.Role {
+	case "feature-delivery-intake":
+		return "intake", nil
+	case "feature-delivery-planner":
+		return "planner", nil
+	case "feature-delivery-implementer":
+		return "implementer", nil
+	case "explorer":
+		return "explorer:impact_analysis", nil
+	case "feature-delivery-reviewer":
+		var instructions struct {
+			Lane string `json:"lane"`
+		}
+		if json.Unmarshal(payload.Instructions, &instructions) != nil {
+			return "", fmt.Errorf("decode review lane")
+		}
+		switch instructions.Lane {
+		case "correctness", "conflict_recheck":
+			return "reviewer:correctness", nil
+		case "regression":
+			return "reviewer:regression", nil
+		case "specialist":
+			return "reviewer:specialist", nil
+		default:
+			return "", fmt.Errorf("unsupported FDL review lane %q", instructions.Lane)
+		}
+	default:
+		return "", fmt.Errorf("unsupported FDL Controller role %q", payload.Attempt.Role)
+	}
+}
+
+func (d *Daemon) createFDLDispatchTasks(ctx context.Context, runID string, bindings []fdlWorkItemBinding) error {
+	for _, binding := range bindings {
+		if binding.State == "dispatch_failed" || binding.TaskID != "" {
+			continue
+		}
+		payload, err := d.readFDLDispatchPayload(runID, binding.WorkItemID)
+		if err != nil {
+			return err
+		}
+		role, err := fdlProfileRole(payload)
+		if err != nil {
+			binding.State = "dispatch_failed"
+			binding.DispatchError = boundedFDLError(err)
+			binding.UpdatedAt = time.Now().UTC()
+			if err := writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding); err != nil {
+				return err
+			}
+			continue
+		}
+		binding.Role = role
+		instructions, err := d.fdlAgentInstructions(runID, binding, payload)
+		if err != nil {
+			return err
+		}
+		taskID, err := d.client.CreateFDLAgentTask(ctx, runID, role, instructions, binding.DispatchKey, 0)
+		if err != nil {
+			// A rejected frozen runtime/role cannot become valid through a blind
+			// retry. Report it as a declared dispatch failure; transport errors
+			// stay unacknowledged and are retried idempotently by dispatch_key.
+			var requestErr *requestError
+			if errors.As(err, &requestErr) && requestErr.StatusCode >= 400 && requestErr.StatusCode < 500 {
+				binding.State = "dispatch_failed"
+				binding.DispatchError = boundedFDLError(err)
+				binding.UpdatedAt = time.Now().UTC()
+				if writeErr := writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding); writeErr != nil {
+					return writeErr
+				}
+				continue
+			}
+			return fmt.Errorf("create direct FDL task for %s: %w", binding.WorkItemID, err)
+		}
+		binding.TaskID = taskID
+		binding.State = "pending_ack"
+		binding.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fdlAgentInstructions deliberately shares only Controller instructions and
+// the caller's own private result location. It never sends a dispatch file,
+// run-root location, external-work ID, or submission token to an Agent.
+func (d *Daemon) fdlAgentInstructions(runID string, binding fdlWorkItemBinding, payload fdlDispatchPayload) (string, error) {
+	if len(payload.Instructions) == 0 || !json.Valid(payload.Instructions) {
+		return "", fmt.Errorf("FDL dispatch instructions are invalid")
+	}
+	prettyInstructions := &bytes.Buffer{}
+	if err := json.Indent(prettyInstructions, payload.Instructions, "", "  "); err != nil {
+		return "", fmt.Errorf("format FDL dispatch instructions: %w", err)
+	}
+	itemDir := filepath.Join(d.fdlExecutorStateDir(runID), "work-items", binding.WorkItemID)
+	if binding.Role == "explorer:impact_analysis" {
+		return fmt.Sprintf(`You are the frozen FDL Explorer role.
+
+Execute only this Controller instruction payload:
+%s
+
+Work only in your assigned read-only source projection. Do not inspect or write any FDL run root, Controller state, receipts, other work-item directories, or external systems. Do not create sub-agents, use Issue comments for coordination, or expose delivery tokens.
+
+Write exactly one advisory JSON object to:
+%s
+The object must include schema_version=1 and request_id=%q, plus the requested evidence fields.
+`, prettyInstructions.String(), filepath.Join(itemDir, "advisory.json"), binding.WorkItemID), nil
+	}
+	return fmt.Sprintf(`You are the frozen FDL delivery role %q.
+
+Execute only this Controller instruction payload:
+%s
+
+Work only in your assigned task workspace and within the frozen change rules. Do not inspect or write any FDL run root, Controller state, receipts, other work-item directories, or external systems. Do not create sub-agents, use Issue comments for coordination, or expose delivery tokens.
+
+Write the role report in Markdown to:
+%s
+Optionally write JSON metadata to %s with only outcome (completed|blocked|failed), decision (accepted|changes_requested), evidence_consistency (checked|not_applicable|conflict_found), contract_index, context_pack, changed_paths_from_workspace, findings, blockers, and failure. Do not include identifiers copied from FDL state; the local executor binds them.
+`, binding.Role, prettyInstructions.String(), filepath.Join(itemDir, "report.md"), filepath.Join(itemDir, "meta.json")), nil
+}
+
+func (d *Daemon) acknowledgeAndActivateFDLDispatch(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+	stateDir := d.fdlExecutorStateDir(runID)
+	receiptPath := filepath.Join(stateDir, "dispatch-receipt.json")
+	receipt, err := d.loadOrCreateFDLDispatchReceipt(runID, mailbox)
+	if err != nil {
+		return err
+	}
+	if !receipt.ControllerAcknowledged {
+		eventPath := filepath.Join(stateDir, "ack-event.json")
+		if err := writeFDLExecutorJSON(eventPath, d.fdlAcknowledgementEvent(receipt)); err != nil {
+			return err
+		}
+		output, err := d.runFDLCommandOutput(ctx, "drive-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--operation-id", receipt.AckOperationID, "--event", eventPath)
+		if err != nil {
+			return fmt.Errorf("acknowledge FDL dispatch: %w", err)
+		}
+		if err := validateFDLReturnedEnvelope(output, receipt.FDLRunID); err != nil {
+			return err
+		}
+		receipt.ControllerAcknowledged = true
+		receipt.ReturnedEnvelope = output
+		receipt.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
+			return err
+		}
+	}
+	if err := d.activateFDLDispatchTasks(ctx, runID, receipt); err != nil {
+		return err
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(stateDir, "executor.mailbox"), fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)); err != nil {
+		return err
+	}
+	if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove completed FDL dispatch receipt: %w", err)
+	}
+	if err := os.Remove(filepath.Join(stateDir, "ack-event.json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove completed FDL acknowledgement event: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) loadOrCreateFDLDispatchReceipt(runID string, mailbox *fdlExecutorMailbox) (*fdlDispatchReceipt, error) {
+	path := filepath.Join(d.fdlExecutorStateDir(runID), "dispatch-receipt.json")
+	var receipt fdlDispatchReceipt
+	found, err := readFDLExecutorJSON(path, &receipt)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if err := validateFDLDispatchReceipt(receipt, mailbox); err != nil {
+			return nil, err
+		}
+		return &receipt, nil
+	}
+	bindings, err := d.materializeFDLDispatch(runID, mailbox)
+	if err != nil {
+		return nil, err
+	}
+	operationID, err := newFDLOperationID()
+	if err != nil {
+		return nil, err
+	}
+	receipt = fdlDispatchReceipt{
+		SchemaVersion: 1, FDLRunID: mailbox.FDLRunID, ActionID: mailbox.ActionID,
+		AckOperationID: operationID, TaskIDs: map[string]string{}, DispatchFailures: map[string]string{}, Activated: map[string]bool{}, UpdatedAt: time.Now().UTC(),
+	}
+	for _, binding := range bindings {
+		if receipt.ExternalWorkID == "" {
+			receipt.ExternalWorkID = binding.ExternalWorkID
+		} else if receipt.ExternalWorkID != binding.ExternalWorkID {
+			return nil, fmt.Errorf("FDL dispatch work items disagree on external work ID")
+		}
+		if binding.State == "dispatch_failed" {
+			receipt.DispatchFailures[binding.WorkItemID] = binding.DispatchError
+			continue
+		}
+		if binding.TaskID == "" || binding.State != "pending_ack" {
+			return nil, fmt.Errorf("FDL work item %s is not ready for acknowledgement", binding.WorkItemID)
+		}
+		receipt.TaskIDs[binding.WorkItemID] = binding.TaskID
+	}
+	if receipt.ExternalWorkID == "" || len(receipt.TaskIDs)+len(receipt.DispatchFailures) != len(bindings) {
+		return nil, fmt.Errorf("FDL dispatch receipt does not cover every work item")
+	}
+	if err := writeFDLExecutorJSON(path, receipt); err != nil {
+		return nil, err
+	}
+	return &receipt, nil
+}
+
+func validateFDLDispatchReceipt(receipt fdlDispatchReceipt, mailbox *fdlExecutorMailbox) error {
+	if receipt.SchemaVersion != 1 || receipt.FDLRunID != mailbox.FDLRunID || receipt.ActionID != mailbox.ActionID || receipt.ExternalWorkID == "" || receipt.AckOperationID == "" || receipt.TaskIDs == nil || receipt.Activated == nil {
+		return fmt.Errorf("FDL dispatch receipt conflicts with mailbox")
+	}
+	return nil
+}
+
+func (d *Daemon) fdlAcknowledgementEvent(receipt *fdlDispatchReceipt) map[string]any {
+	ids := make([]string, 0, len(receipt.TaskIDs)+len(receipt.DispatchFailures))
+	for id := range receipt.TaskIDs {
+		ids = append(ids, id)
+	}
+	for id := range receipt.DispatchFailures {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	acknowledgements := make([]map[string]string, 0, len(ids))
+	executorIdentity := "multica-daemon:" + d.cfg.DaemonID
+	for _, id := range ids {
+		status := "acknowledged"
+		if _, failed := receipt.DispatchFailures[id]; failed {
+			status = "dispatch_failed"
+		}
+		acknowledgements = append(acknowledgements, map[string]string{
+			"work_item_id": id, "status": status, "executor_identity": executorIdentity, "identity_assurance": "human_attested",
+		})
+	}
+	return map[string]any{
+		"envelope_version": 1, "kind": "external_work_acknowledged", "run_id": receipt.FDLRunID,
+		"action_id": receipt.ActionID, "external_work_id": receipt.ExternalWorkID, "acknowledgements": acknowledgements,
+	}
+}
+
+func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID string, receipt *fdlDispatchReceipt) error {
+	workItemIDs := make([]string, 0, len(receipt.TaskIDs))
+	for workItemID := range receipt.TaskIDs {
+		workItemIDs = append(workItemIDs, workItemID)
+	}
+	sort.Strings(workItemIDs)
+	for _, workItemID := range workItemIDs {
+		if receipt.Activated[workItemID] {
+			continue
+		}
+		if err := d.client.ActivateFDLAgentTask(ctx, runID, receipt.TaskIDs[workItemID]); err != nil {
+			return fmt.Errorf("activate FDL task for %s: %w", workItemID, err)
+		}
+		var binding fdlWorkItemBinding
+		if found, err := readFDLExecutorJSON(d.fdlBindingPath(runID, workItemID), &binding); err != nil {
+			return fmt.Errorf("read FDL binding for activation: %w", err)
+		} else if !found {
+			return fmt.Errorf("FDL binding for activation is missing")
+		}
+		binding.State = "activated"
+		binding.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(d.fdlBindingPath(runID, workItemID), binding); err != nil {
+			return err
+		}
+		receipt.Activated[workItemID] = true
+		receipt.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "dispatch-receipt.json"), receipt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recoverFDLDispatchReceipt finishes only work whose Controller acknowledgement
+// is already durable. It must run before reading a mailbox action so an old
+// dispatch can never be driven a second time after a daemon crash.
+func (d *Daemon) recoverFDLDispatchReceipt(ctx context.Context, runID string, mailbox *fdlExecutorMailbox) error {
+	path := filepath.Join(d.fdlExecutorStateDir(runID), "dispatch-receipt.json")
+	var receipt fdlDispatchReceipt
+	found, err := readFDLExecutorJSON(path, &receipt)
+	if err != nil || !found {
+		return err
+	}
+	if !receipt.ControllerAcknowledged {
+		if mailbox == nil || validateFDLDispatchReceipt(receipt, mailbox) != nil {
+			return fmt.Errorf("unacknowledged FDL dispatch receipt does not match mailbox")
+		}
+		return nil
+	}
+	if err := validateFDLReturnedEnvelope(receipt.ReturnedEnvelope, receipt.FDLRunID); err != nil {
+		return err
+	}
+	returned := fdlMailboxFromEnvelope(receipt.ReturnedEnvelope)
+	if mailbox != nil && mailbox.ActionID == returned.ActionID {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if mailbox == nil || validateFDLDispatchReceipt(receipt, mailbox) != nil {
+		return fmt.Errorf("acknowledged FDL dispatch receipt conflicts with mailbox")
+	}
+	if err := d.activateFDLDispatchTasks(ctx, runID, &receipt); err != nil {
+		return err
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), returned); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func validateFDLReturnedEnvelope(raw json.RawMessage, runID string) error {
+	mailbox := fdlMailboxFromEnvelope(raw)
+	if mailbox.FDLRunID != runID || mailbox.ActionID == "" || mailbox.ActionKind == "" {
+		return fmt.Errorf("decode FDL Controller acknowledgement envelope")
+	}
+	return nil
+}
+
+func fdlMailboxFromEnvelope(raw json.RawMessage) *fdlExecutorMailbox {
+	var envelope struct {
+		RunID      string `json:"run_id"`
+		NextAction struct {
+			ActionID string `json:"action_id"`
+			Kind     string `json:"kind"`
+		} `json:"next_action"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return &fdlExecutorMailbox{}
+	}
+	return &fdlExecutorMailbox{SchemaVersion: 1, FDLRunID: envelope.RunID, ActionID: envelope.NextAction.ActionID, ActionKind: envelope.NextAction.Kind, Envelope: raw, UpdatedAt: time.Now().UTC()}
+}
+
+// collectFDLTaskResults is intentionally independent from a mailbox action:
+// after acknowledgement the Controller normally says await_external_results,
+// while the private bindings retain the original action/token identity needed
+// to submit each terminal result exactly once.
+func (d *Daemon) collectFDLTaskResults(ctx context.Context, runID string, controllerRunID string) error {
+	itemsDir := filepath.Join(d.fdlExecutorStateDir(runID), "work-items")
+	entries, err := os.ReadDir(itemsDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list FDL work items: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		var binding fdlWorkItemBinding
+		found, err := readFDLExecutorJSON(d.fdlBindingPath(runID, entry.Name()), &binding)
+		if err != nil {
+			return fmt.Errorf("read FDL work-item binding: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("FDL work-item binding is missing")
+		}
+		if binding.FDLRunID != controllerRunID || binding.TaskID == "" || binding.TerminalSubmitted || binding.State == "dispatch_failed" {
+			continue
+		}
+		status, err := d.client.GetTaskStatus(ctx, binding.TaskID)
+		if err != nil {
+			return fmt.Errorf("read FDL task %s status: %w", binding.WorkItemID, err)
+		}
+		if status != "completed" && status != "failed" && status != "cancelled" {
+			continue
+		}
+		if err := d.submitFDLTerminalTask(ctx, runID, &binding, status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) submitFDLTerminalTask(ctx context.Context, runID string, binding *fdlWorkItemBinding, taskStatus string) error {
+	itemDir := filepath.Join(d.fdlExecutorStateDir(runID), "work-items", binding.WorkItemID)
+	eventPath := filepath.Join(itemDir, "terminal-event.json")
+	if binding.TerminalOperationID == "" {
+		event, err := d.buildFDLTerminalEvent(ctx, runID, *binding, taskStatus)
+		if err != nil {
+			event = fdlTaskFailureEvent(*binding, "invalid_result", boundedFDLError(err))
+		}
+		if err := writeFDLExecutorJSON(eventPath, event); err != nil {
+			return err
+		}
+		operationID, err := newFDLOperationID()
+		if err != nil {
+			return err
+		}
+		binding.TerminalOperationID = operationID
+		binding.State = "terminal_submitting"
+		binding.UpdatedAt = time.Now().UTC()
+		if err := writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding); err != nil {
+			return err
+		}
+	}
+	output, err := d.runFDLCommandOutput(ctx, "drive-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--operation-id", binding.TerminalOperationID, "--event", eventPath)
+	if err != nil {
+		return fmt.Errorf("submit FDL terminal result for %s: %w", binding.WorkItemID, err)
+	}
+	if err := validateFDLReturnedEnvelope(output, binding.FDLRunID); err != nil {
+		return err
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(d.fdlExecutorStateDir(runID), "executor.mailbox"), fdlMailboxFromEnvelope(output)); err != nil {
+		return err
+	}
+	binding.TerminalSubmitted = true
+	binding.State = "terminal_submitted"
+	binding.UpdatedAt = time.Now().UTC()
+	return writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding)
+}
+
+func fdlTaskFailureEvent(binding fdlWorkItemBinding, kind, reason string) map[string]any {
+	return map[string]any{
+		"envelope_version": 1, "kind": "work_item_failed", "run_id": binding.FDLRunID,
+		"external_work_id": binding.ExternalWorkID, "work_item_id": binding.WorkItemID,
+		"submission_token": binding.SubmissionToken, "origin_action_id": binding.ActionID,
+		"failure": map[string]string{"kind": kind, "reason": reason},
+	}
+}
+
+func (d *Daemon) buildFDLTerminalEvent(ctx context.Context, runID string, binding fdlWorkItemBinding, taskStatus string) (map[string]any, error) {
+	if taskStatus != "completed" {
+		return fdlTaskFailureEvent(binding, "multica_task_"+taskStatus, "direct Multica Agent task ended as "+taskStatus), nil
+	}
+	itemDir := filepath.Join(d.fdlExecutorStateDir(runID), "work-items", binding.WorkItemID)
+	if binding.Role == "explorer:impact_analysis" {
+		advisory, err := readFDLExplorerAdvisory(filepath.Join(itemDir, "advisory.json"), binding.WorkItemID)
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := canonicalFDLJSON(advisory)
+		if err != nil {
+			return nil, err
+		}
+		digest := fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
+		return map[string]any{
+			"envelope_version": 1, "kind": "work_item_completed", "run_id": binding.FDLRunID,
+			"external_work_id": binding.ExternalWorkID, "work_item_id": binding.WorkItemID,
+			"submission_token": binding.SubmissionToken, "origin_action_id": binding.ActionID,
+			"result": map[string]any{"media_type": "application/json", "sha256": digest, "content": advisory},
+		}, nil
+	}
+	return d.buildFDLRoleCompletionEvent(ctx, runID, binding, itemDir)
+}
+
+func readFDLExplorerAdvisory(path, workItemID string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read Explorer advisory: %w", err)
+	}
+	var advisory map[string]any
+	if json.Unmarshal(data, &advisory) != nil || advisory["schema_version"] != float64(1) || advisory["request_id"] != workItemID {
+		return nil, fmt.Errorf("Explorer advisory is invalid")
+	}
+	return advisory, nil
+}
+
+func canonicalFDLJSON(value any) ([]byte, error) {
+	var encoded bytes.Buffer
+	if err := appendCanonicalFDLJSON(&encoded, value); err != nil {
+		return nil, err
+	}
+	// FDL's digest contract includes exactly one final newline.
+	encoded.WriteByte('\n')
+	return encoded.Bytes(), nil
+}
+
+const fdlMaxSafeJSONInteger = 9007199254740991
+
+// appendCanonicalFDLJSON mirrors FDL's cross-language canonical JSON: object
+// keys are ordered by UTF-16BE bytes, strings preserve non-ASCII data, and
+// only interoperable integers are accepted. Explorer output is untrusted, so
+// rejecting values outside this narrow contract is preferable to a digest the
+// Python Controller cannot reproduce.
+func appendCanonicalFDLJSON(out *bytes.Buffer, value any) error {
+	switch v := value.(type) {
+	case nil:
+		out.WriteString("null")
+	case bool:
+		if v {
+			out.WriteString("true")
+		} else {
+			out.WriteString("false")
+		}
+	case string:
+		encoded, err := marshalFDLJSONString(v)
+		if err != nil {
+			return err
+		}
+		out.Write(encoded)
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < -fdlMaxSafeJSONInteger || v > fdlMaxSafeJSONInteger {
+			return fmt.Errorf("FDL canonical JSON only permits interoperable integers")
+		}
+		out.WriteString(strconv.FormatInt(int64(v), 10))
+	case []any:
+		out.WriteByte('[')
+		for i, item := range v {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			if err := appendCanonicalFDLJSON(out, item); err != nil {
+				return err
+			}
+		}
+		out.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return bytes.Compare(fdlUTF16BE(keys[i]), fdlUTF16BE(keys[j])) < 0
+		})
+		out.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			encoded, err := marshalFDLJSONString(key)
+			if err != nil {
+				return err
+			}
+			out.Write(encoded)
+			out.WriteByte(':')
+			if err := appendCanonicalFDLJSON(out, v[key]); err != nil {
+				return err
+			}
+		}
+		out.WriteByte('}')
+	default:
+		return fmt.Errorf("FDL canonical JSON rejects %T", value)
+	}
+	return nil
+}
+
+func marshalFDLJSONString(value string) ([]byte, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(encoded.Bytes(), []byte("\n")), nil
+}
+
+func fdlUTF16BE(value string) []byte {
+	codeUnits := utf16.Encode([]rune(value))
+	encoded := make([]byte, len(codeUnits)*2)
+	for i, unit := range codeUnits {
+		encoded[i*2] = byte(unit >> 8)
+		encoded[i*2+1] = byte(unit)
+	}
+	return encoded
+}
+
+func (d *Daemon) buildFDLRoleCompletionEvent(ctx context.Context, runID string, binding fdlWorkItemBinding, itemDir string) (map[string]any, error) {
+	reportPath := filepath.Join(itemDir, "report.md")
+	report, err := os.ReadFile(reportPath)
+	if err != nil || len(bytes.TrimSpace(report)) == 0 {
+		return nil, fmt.Errorf("FDL role report is missing or empty")
+	}
+	meta, err := readFDLRoleMeta(filepath.Join(itemDir, "meta.json"))
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"complete-work-item", "--run-root", filepath.Join(d.cfg.FDLRunRoot, runID), "--work-item-id", binding.WorkItemID, "--report", reportPath}
+	for _, field := range []string{"contract_index", "context_pack", "findings", "blockers", "failure"} {
+		if value, ok := meta[field]; ok {
+			path := filepath.Join(itemDir, "submission-"+field+".json")
+			if err := writeFDLExecutorJSON(path, value); err != nil {
+				return nil, err
+			}
+			args = append(args, "--"+strings.ReplaceAll(field, "_", "-"), path)
+		}
+	}
+	if outcome, ok := meta["outcome"].(string); ok {
+		if outcome != "completed" && outcome != "blocked" && outcome != "failed" {
+			return nil, fmt.Errorf("FDL role metadata outcome is invalid")
+		}
+		args = append(args, "--outcome", outcome)
+	}
+	if decision, ok := meta["decision"].(string); ok {
+		if decision != "accepted" && decision != "changes_requested" {
+			return nil, fmt.Errorf("FDL role metadata decision is invalid")
+		}
+		args = append(args, "--decision", decision)
+	}
+	if consistency, ok := meta["evidence_consistency"].(string); ok {
+		if consistency != "checked" && consistency != "not_applicable" && consistency != "conflict_found" {
+			return nil, fmt.Errorf("FDL role metadata evidence consistency is invalid")
+		}
+		args = append(args, "--evidence-consistency", consistency)
+	}
+	if changedPaths, ok := meta["changed_paths_from_workspace"].(bool); ok && changedPaths {
+		args = append(args, "--changed-paths-from-workspace")
+	}
+	output, err := d.runFDLCommandOutput(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	var event map[string]any
+	if err := json.Unmarshal(output, &event); err != nil {
+		return nil, fmt.Errorf("decode complete-work-item result: %w", err)
+	}
+	return event, nil
+}
+
+func readFDLRoleMeta(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read FDL role metadata: %w", err)
+	}
+	var meta map[string]any
+	if json.Unmarshal(data, &meta) != nil {
+		return nil, fmt.Errorf("FDL role metadata is invalid JSON")
+	}
+	for key := range meta {
+		switch key {
+		case "outcome", "decision", "evidence_consistency", "contract_index", "context_pack", "changed_paths_from_workspace", "findings", "blockers", "failure":
+		default:
+			return nil, fmt.Errorf("FDL role metadata contains unsupported field %q", key)
+		}
+	}
+	return meta, nil
+}
+
+// materializeFDLDispatch creates per-item private input/result directories and
+// records a durable pre-dispatch binding. A crash after that point fails closed
+// rather than reposting an ambiguous direct task. The subsequent acknowledgement
+// path is intentionally responsible for advancing the Controller.
+func (d *Daemon) materializeFDLDispatch(runID string, mailbox *fdlExecutorMailbox) ([]fdlWorkItemBinding, error) {
+	var envelope fdlDispatchEnvelope
+	if err := json.Unmarshal(mailbox.Envelope, &envelope); err != nil {
+		return nil, fmt.Errorf("decode FDL dispatch mailbox: %w", err)
+	}
+	if envelope.RunID != mailbox.FDLRunID || envelope.NextAction.ActionID != mailbox.ActionID || !strings.HasPrefix(envelope.NextAction.Kind, "dispatch_") || envelope.NextAction.ExternalWorkID == "" || len(envelope.NextAction.WorkItems) == 0 {
+		return nil, fmt.Errorf("mailbox does not contain a dispatch action")
+	}
+	runRoot := filepath.Join(d.cfg.FDLRunRoot, runID)
+	stateDir := d.fdlExecutorStateDir(runID)
+	bindings := make([]fdlWorkItemBinding, 0, len(envelope.NextAction.WorkItems))
+	for _, item := range envelope.NextAction.WorkItems {
+		if item.WorkItemID == "" || item.SubmissionToken == "" || item.Dispatch.Path == "" || item.Dispatch.SHA256 == "" {
+			return nil, fmt.Errorf("invalid FDL dispatch work item")
+		}
+		dispatchPath, err := fdlRunFilePath(runRoot, item.Dispatch.Path)
+		if err != nil {
+			return nil, err
+		}
+		dispatch, err := os.ReadFile(dispatchPath)
+		if err != nil || "sha256:"+fmt.Sprintf("%x", sha256.Sum256(dispatch)) != item.Dispatch.SHA256 {
+			return nil, fmt.Errorf("dispatch evidence hash mismatch for %s", item.WorkItemID)
+		}
+		var payload fdlDispatchPayload
+		if json.Unmarshal(dispatch, &payload) != nil || payload.Attempt.Role == "" {
+			return nil, fmt.Errorf("invalid dispatch evidence for %s", item.WorkItemID)
+		}
+		itemDir := filepath.Join(stateDir, "work-items", item.WorkItemID)
+		if err := os.MkdirAll(itemDir, 0o700); err != nil {
+			return nil, err
+		}
+		bindingPath := filepath.Join(itemDir, "binding.json")
+		var existing fdlWorkItemBinding
+		if found, err := readFDLExecutorJSON(bindingPath, &existing); err != nil {
+			return nil, err
+		} else if found {
+			if existing.FDLRunID != envelope.RunID || existing.ActionID != envelope.NextAction.ActionID || existing.WorkItemID != item.WorkItemID || existing.SubmissionToken != item.SubmissionToken {
+				return nil, fmt.Errorf("existing FDL work-item binding conflicts with current action")
+			}
+			bindings = append(bindings, existing)
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(itemDir, "dispatch.json"), dispatch, 0o400); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(itemDir, "report.md"), nil, 0o600); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(itemDir, "meta.json"), []byte("{}\n"), 0o600); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(itemDir, "advisory.json"), []byte("{}\n"), 0o600); err != nil {
+			return nil, err
+		}
+		dispatchKey, err := newFDLOperationID()
+		if err != nil {
+			return nil, err
+		}
+		binding := fdlWorkItemBinding{SchemaVersion: 1, FDLRunID: envelope.RunID, ActionID: envelope.NextAction.ActionID, ExternalWorkID: envelope.NextAction.ExternalWorkID, WorkItemID: item.WorkItemID, SubmissionToken: item.SubmissionToken, DispatchSHA256: item.Dispatch.SHA256, DispatchKey: dispatchKey, Role: payload.Attempt.Role, State: "prepared", UpdatedAt: time.Now().UTC()}
+		if err := writeFDLExecutorJSON(bindingPath, binding); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, binding)
+	}
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].WorkItemID < bindings[j].WorkItemID })
+	return bindings, nil
+}
+
+func fdlRunFilePath(runRoot, referencePath string) (string, error) {
+	if filepath.IsAbs(referencePath) {
+		return "", fmt.Errorf("FDL dispatch reference must be relative")
+	}
+	path := filepath.Clean(filepath.Join(runRoot, referencePath))
+	rel, err := filepath.Rel(runRoot, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("FDL dispatch reference escapes run root")
+	}
+	return path, nil
+}
+
+func boundedFDLError(err error) string { return boundedFDLErrorText(err.Error()) }
+
+func boundedFDLErrorText(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 300 {
+		return value[:300]
+	}
+	return value
+}

@@ -454,6 +454,103 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
 	return resp.Status, nil
 }
 
+// PendingFDLIssueRun is the daemon-only frozen launch contract for an FDL
+// delivery. It deliberately excludes executor-private run roots, leases,
+// result directories, and Controller submission tokens.
+type PendingFDLIssueRun struct {
+	ID               string          `json:"id"`
+	IssueID          string          `json:"issue_id"`
+	ProfileID        string          `json:"profile_id"`
+	FDLRunID         *string         `json:"fdl_run_id,omitempty"`
+	Status           string          `json:"status"`
+	Phase            string          `json:"phase"`
+	ProfileSnapshot  json.RawMessage `json:"profile_snapshot"`
+	WorktreeSnapshot json.RawMessage `json:"worktree_snapshot"`
+	RuntimeSnapshot  json.RawMessage `json:"runtime_snapshot"`
+	IssueSnapshot    json.RawMessage `json:"issue_snapshot"`
+}
+
+// ListPendingFDLIssueRuns returns only deliveries pinned to this daemon by
+// their frozen code worktree.
+func (c *Client) ListPendingFDLIssueRuns(ctx context.Context) ([]PendingFDLIssueRun, error) {
+	var response struct {
+		Runs []PendingFDLIssueRun `json:"runs"`
+	}
+	if err := c.getJSON(ctx, "/api/daemon/fdl-runs/pending", &response); err != nil {
+		return nil, err
+	}
+	return response.Runs, nil
+}
+
+// ListActiveFDLIssueRuns is the daemon's bounded recovery view. Its response
+// still excludes local executor bindings and Controller submission tokens.
+func (c *Client) ListActiveFDLIssueRuns(ctx context.Context) ([]PendingFDLIssueRun, error) {
+	var response struct {
+		Runs []PendingFDLIssueRun `json:"runs"`
+	}
+	if err := c.getJSON(ctx, "/api/daemon/fdl-runs/active", &response); err != nil {
+		return nil, err
+	}
+	return response.Runs, nil
+}
+
+type initializeFDLIssueRunResponse struct {
+	ID       string `json:"id"`
+	IssueID  string `json:"issue_id"`
+	FDLRunID string `json:"fdl_run_id"`
+	Status   string `json:"status"`
+	Phase    string `json:"phase"`
+}
+
+// InitializeFDLIssueRun records the Controller run ID after a local executor
+// has successfully created and preflighted its external run root.
+func (c *Client) InitializeFDLIssueRun(ctx context.Context, id, fdlRunID string) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/initialize", id), map[string]string{
+		"fdl_run_id": fdlRunID,
+	}, &initializeFDLIssueRunResponse{})
+}
+
+// UpdateFDLIssueRunProjection reports display-safe lifecycle facts. It is not
+// a Controller state write and must not contain result bindings or tokens.
+func (c *Client) UpdateFDLIssueRunProjection(ctx context.Context, id, status, phase, waitingReason, summary, actionType string) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/projection", id), map[string]string{
+		"status":         status,
+		"phase":          phase,
+		"waiting_reason": waitingReason,
+		"summary":        summary,
+		"action_type":    actionType,
+	}, nil)
+}
+
+func (c *Client) CancelFDLIssueRun(ctx context.Context, id, reason string) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/cancelled", id), map[string]string{"reason": reason}, nil)
+}
+
+func (c *Client) ReportFDLIssueRunRecovery(ctx context.Context, id, reason string) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/recovery", id), map[string]string{"reason": reason}, nil)
+}
+
+// CreateFDLAgentTask sends a token-free direct dispatch. The caller retains
+// Controller work-item IDs, submission tokens, and result-directory bindings.
+func (c *Client) CreateFDLAgentTask(ctx context.Context, runID, role, instructions, dispatchKey string, priority int32) (string, error) {
+	var response struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks", runID), map[string]any{
+		"role": role, "instructions": instructions, "dispatch_key": dispatchKey, "priority": priority,
+	}, &response); err != nil {
+		return "", err
+	}
+	if response.TaskID == "" {
+		return "", fmt.Errorf("FDL direct task response omitted task_id")
+	}
+	return response.TaskID, nil
+}
+
+func (c *Client) ActivateFDLAgentTask(ctx context.Context, runID, taskID string) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks/%s/activate", runID, taskID), map[string]any{}, nil)
+}
+
 // HeartbeatResponse, PendingUpdate, etc. alias the wire types so HTTP and WS
 // heartbeat paths share a single type and a single decoder shape. Aliases
 // (rather than wrappers) keep call sites unchanged.

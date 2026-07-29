@@ -89,6 +89,15 @@ describe("ListCodeWorktreesResponseSchema", () => {
 });
 
 describe("IssueSchema (via ListIssuesResponseSchema)", () => {
+	// An installed desktop can receive a response from a pre-FDL server. The
+	// parser retains the existing Squad behavior rather than blanking its Issue
+	// list while it waits for the backend upgrade.
+	it("defaults missing FDL fields to the legacy Squad orchestration", () => {
+		const parsed = ListIssuesResponseSchema.parse({ issues: [baseIssue], total: 1 });
+		expect(parsed.issues[0]?.orchestration_mode).toBe("squad");
+		expect(parsed.issues[0]?.fdl_run_id).toBeNull();
+	});
+
   it("accepts a primitive metadata KV map", () => {
     const payload = {
       issues: [

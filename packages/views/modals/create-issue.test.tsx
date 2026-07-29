@@ -34,6 +34,9 @@ const mockToastCustom = vi.hoisted(() => vi.fn());
 const mockToastDismiss = vi.hoisted(() => vi.fn());
 const mockToastError = vi.hoisted(() => vi.fn());
 const mockUploadWithToast = vi.hoisted(() => vi.fn());
+const mockProjects = vi.hoisted(() => ({ value: [] as Array<Record<string, unknown>> }));
+const mockCodeWorktrees = vi.hoisted(() => ({ value: [] as Array<Record<string, unknown>> }));
+const mockFDLProfiles = vi.hoisted(() => ({ value: [] as Array<Record<string, unknown>> }));
 
 const mockDraftStore = {
   draft: {
@@ -113,6 +116,27 @@ vi.mock("@multica/core/paths", () => ({
 
 vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-test",
+}));
+
+vi.mock("@multica/core/projects/queries", () => ({
+  projectListOptions: () => ({
+    queryKey: ["projects", "list"],
+    queryFn: () => Promise.resolve(mockProjects.value),
+  }),
+}));
+
+vi.mock("@multica/core/projects", () => ({
+  codeWorktreesOptions: () => ({
+    queryKey: ["code-worktrees", "list"],
+    queryFn: () => Promise.resolve(mockCodeWorktrees.value),
+  }),
+}));
+
+vi.mock("@multica/core/fdl", () => ({
+  fdlDeliveryProfilesOptions: () => ({
+    queryKey: ["fdl", "profiles"],
+    queryFn: () => Promise.resolve(mockFDLProfiles.value),
+  }),
 }));
 
 vi.mock("@multica/core/issues/queries", () => ({
@@ -597,6 +621,32 @@ describe("CreateIssueModal", () => {
     });
     mockSetIssueProperty.mockResolvedValue({
       properties: { "property-tier": "option-enterprise" },
+    });
+    mockProjects.value = [];
+    mockCodeWorktrees.value = [];
+    mockFDLProfiles.value = [];
+  });
+
+  it("sends a selected FDL Delivery Profile only for a project with a clean worktree", async () => {
+    const user = userEvent.setup();
+    mockDraftStore.draft.projectId = "project-fdl";
+    mockProjects.value = [{ id: "project-fdl", default_code_worktree_id: "worktree-fdl" }];
+    mockCodeWorktrees.value = [{ id: "worktree-fdl", is_dirty: false }];
+    mockFDLProfiles.value = [{ id: "profile-fdl", name: "Protected delivery" }];
+
+    renderModal(<CreateIssueModal onClose={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: "Select delivery mode" }));
+    await user.click(screen.getByText("Protected delivery"));
+    fireEvent.change(screen.getByPlaceholderText("Issue title"), { target: { value: "FDL delivery" } });
+    await user.click(screen.getByRole("button", { name: "Create Issue" }));
+
+    await waitFor(() => {
+      expect(mockCreateIssue).toHaveBeenCalledWith(expect.objectContaining({
+        project_id: "project-fdl",
+        fdl_profile_id: "profile-fdl",
+        assignee_type: undefined,
+        assignee_id: undefined,
+      }));
     });
   });
 

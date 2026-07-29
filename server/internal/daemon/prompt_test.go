@@ -585,6 +585,34 @@ func TestBuildPromptDefaultMentionsRecent(t *testing.T) {
 	}
 }
 
+func TestBuildPromptFDLDirectNeverUsesIssueOrCommentCoordination(t *testing.T) {
+	prompt := BuildPrompt(Task{
+		IssueID:     "issue-fdl-1",
+		FDLDirect:   true,
+		HandoffNote: "Write the report to the private path supplied by the executor.",
+	}, "codex")
+	for _, forbidden := range []string{
+		"Start by running",
+		"For comment history",
+		"multica issue comment list issue-fdl-1",
+		"Squad leader no_action",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Errorf("FDL direct prompt unexpectedly contains %q:\n%s", forbidden, prompt)
+		}
+	}
+	for _, required := range []string{
+		"direct FDL delivery task",
+		"handoff note exactly",
+		"private output location",
+		"private path supplied by the executor",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("FDL direct prompt missing %q:\n%s", required, prompt)
+		}
+	}
+}
+
 // TestBuildPromptNonSquadLeaderNoRule verifies that non-squad-leader agents
 // do NOT get the squad leader no_action rule injected.
 func TestBuildPromptNonSquadLeaderNoRule(t *testing.T) {

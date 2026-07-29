@@ -15,6 +15,9 @@ import (
 // post with `--content-file`) because the shell-layer corruption it guards
 // against is not specific to any one provider or host (MUL-2904, #4182).
 func BuildPrompt(task Task, provider string) string {
+	if task.FDLDirect {
+		return buildFDLDirectPrompt(task)
+	}
 	if task.ChatSessionID != "" {
 		return buildChatPrompt(task)
 	}
@@ -39,6 +42,23 @@ func BuildPrompt(task Task, provider string) string {
 	}
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
 	fmt.Fprintf(&b, "For comment history, follow the rule in your runtime workflow file (assignment-triggered tasks treat the read as mandatory). Start with `multica issue comment list %s --recent 10 --output json` to read the 10 most recently active threads, then page older threads via the stderr `Next thread cursor: ...` line and the matching `--before` / `--before-id` until you have enough history. Resolved threads come back folded — `--full` to expand. `--since <RFC3339>` is still available for incremental polling and may combine with `--recent`.\n", task.IssueID)
+	return b.String()
+}
+
+// buildFDLDirectPrompt keeps the Agent on the Controller-provided handoff.
+// FDL result submission happens through private executor files, so Issue reads,
+// comments, and Squad delegation would be both misleading and unsafe here.
+func buildFDLDirectPrompt(task Task) string {
+	var b strings.Builder
+	b.WriteString("You are executing one direct FDL delivery task.\n\n")
+	b.WriteString("Follow the handoff note exactly and work only in the assigned workspace.\n")
+	b.WriteString("Do not call `multica issue get`, list or post Issue comments, create sub-issues, coordinate with a Squad, or create sub-agents.\n")
+	b.WriteString("Do not search for FDL Controller state, run roots, receipts, tokens, or other task directories.\n")
+	b.WriteString("Report only through the private output location named in the handoff note.\n\n")
+	if task.HandoffNote != "" {
+		b.WriteString("FDL handoff:\n\n")
+		fmt.Fprintf(&b, "> %s\n", task.HandoffNote)
+	}
 	return b.String()
 }
 

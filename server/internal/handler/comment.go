@@ -1895,6 +1895,12 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 // — the implicit routing fallbacks (assignee, thread parent, conversation) were
 // never named by the user, so a no-route there is not a silent no-op.
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) ([]commentAgentTrigger, []commentMentionTarget) {
+	// An FDL Issue has no conversational Leader. Comments remain ordinary audit
+	// text, but neither explicit mentions nor fallback routing may dispatch an
+	// Agent or alter the Controller-owned workflow state.
+	if issue.OrchestrationMode == "fdl" {
+		return nil, nil
+	}
 	if isNoteComment(content) {
 		return nil, nil
 	}

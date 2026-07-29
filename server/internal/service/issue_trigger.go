@@ -88,6 +88,12 @@ func allowAllAgents(db.Agent) bool { return true }
 //     same unique index, so the assignee still ends up with one pending run.
 func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput, probe IssueTriggerProbe) (IssueRunTrigger, bool) {
 	issue := in.Issue
+	// FDL dispatch is Controller-owned and reaches Agents through a direct,
+	// token-bound external work item. Issue updates must never fall back to the
+	// legacy agent/squad assignment trigger or create a competing Leader loop.
+	if issue.OrchestrationMode == "fdl" {
+		return IssueRunTrigger{}, false
+	}
 	if !issue.AssigneeType.Valid || !issue.AssigneeID.Valid {
 		return IssueRunTrigger{}, false
 	}

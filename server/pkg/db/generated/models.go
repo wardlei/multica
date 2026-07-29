@@ -512,6 +512,41 @@ type DaemonToken struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type FdlDeliveryProfile struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description"`
+	SquadID          pgtype.UUID        `json:"squad_id"`
+	ControllerConfig []byte             `json:"controller_config"`
+	RoleBindings     []byte             `json:"role_bindings"`
+	CreatedBy        pgtype.UUID        `json:"created_by"`
+	ArchivedAt       pgtype.Timestamptz `json:"archived_at"`
+	ArchivedBy       pgtype.UUID        `json:"archived_by"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+type FdlIssueRun struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	IssueID          pgtype.UUID        `json:"issue_id"`
+	ProfileID        pgtype.UUID        `json:"profile_id"`
+	FdlRunID         pgtype.Text        `json:"fdl_run_id"`
+	Status           string             `json:"status"`
+	Phase            string             `json:"phase"`
+	ProfileSnapshot  []byte             `json:"profile_snapshot"`
+	WorktreeSnapshot []byte             `json:"worktree_snapshot"`
+	RuntimeSnapshot  []byte             `json:"runtime_snapshot"`
+	StateProjection  []byte             `json:"state_projection"`
+	CreatedBy        pgtype.UUID        `json:"created_by"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	IssueSnapshot    []byte             `json:"issue_snapshot"`
+}
+
 type Feedback struct {
 	ID          pgtype.UUID        `json:"id"`
 	UserID      pgtype.UUID        `json:"user_id"`
@@ -638,6 +673,8 @@ type Issue struct {
 	Metadata           []byte             `json:"metadata"`
 	Stage              pgtype.Int4        `json:"stage"`
 	Properties         []byte             `json:"properties"`
+	OrchestrationMode  string             `json:"orchestration_mode"`
+	FdlRunID           pgtype.Text        `json:"fdl_run_id"`
 }
 
 type IssueDependency struct {

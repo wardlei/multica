@@ -20,6 +20,7 @@ import {
   Settings2,
   Shapes,
   Tag,
+  Workflow,
   X as XIcon,
 } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
@@ -56,6 +57,9 @@ import { ShortcutKeycaps } from "../common/shortcut-keycaps";
 import { StatusIcon, StatusPicker, PriorityIcon, PriorityPicker, StagePicker, AssigneePicker, StartDatePicker, DueDatePicker, LabelPicker } from "../issues/components";
 import { maxSiblingStage } from "../issues/components/pickers/stage-picker";
 import { ProjectPicker } from "../projects/components/project-picker";
+import { projectListOptions } from "@multica/core/projects/queries";
+import { codeWorktreesOptions } from "@multica/core/projects";
+import { fdlDeliveryProfilesOptions } from "@multica/core/fdl";
 import { useIssueTriggerPreview } from "../issues/hooks/use-issue-trigger-preview";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
@@ -274,6 +278,7 @@ export function ManualCreatePanel({
   const [parentIssueId, setParentIssueId] = useState<string | undefined>(
     (data?.parent_issue_id as string) || undefined,
   );
+  const [fdlProfileId, setFDLProfileId] = useState<string | undefined>();
   // Stage only applies to a sub-issue; kept local (not in the persisted draft)
   // since it's a per-creation choice tied to the chosen parent.
   const [stage, setStage] = useState<number | null>(
@@ -306,6 +311,9 @@ export function ManualCreatePanel({
   // List cache usually has it already, so this resolves synchronously.
   const wsId = useWorkspaceId();
   const { data: workspaceProperties = [] } = useQuery(propertyListOptions(wsId));
+  const { data: projects = [] } = useQuery(projectListOptions(wsId));
+  const { data: codeWorktrees = [] } = useQuery(codeWorktreesOptions(wsId));
+  const { data: fdlProfiles = [] } = useQuery(fdlDeliveryProfilesOptions(wsId));
   const { data: parentIssue } = useQuery({
     ...issueDetailOptions(wsId, parentIssueId ?? ""),
     enabled: !!parentIssueId,
@@ -316,6 +324,12 @@ export function ManualCreatePanel({
     ...childIssuesOptions(wsId, parentIssueId ?? ""),
     enabled: !!parentIssueId,
   });
+  const selectedProject = projects.find((project) => project.id === projectId);
+  const selectedWorktree = selectedProject?.default_code_worktree_id
+    ? codeWorktrees.find((worktree) => worktree.id === selectedProject.default_code_worktree_id)
+    : undefined;
+  const fdlEligible = !!selectedProject && !!selectedWorktree && !selectedWorktree.is_dirty;
+  const selectedFDLProfile = fdlProfiles.find((profile) => profile.id === fdlProfileId);
 
   const draftAttachments = draft.attachments ?? [];
 
@@ -361,7 +375,15 @@ export function ManualCreatePanel({
     setAssigneeType(type); setAssigneeId(id);
     setDraft({ assigneeType: type, assigneeId: id });
   };
-  const updateProject = (id?: string) => { setProjectId(id); setDraft({ projectId: id }); };
+  const updateProject = (id?: string) => {
+    setProjectId(id);
+    setDraft({ projectId: id });
+    const project = projects.find((item) => item.id === id);
+    const worktree = project?.default_code_worktree_id
+      ? codeWorktrees.find((item) => item.id === project.default_code_worktree_id)
+      : undefined;
+    if (!worktree || worktree.is_dirty) setFDLProfileId(undefined);
+  };
   const updateStartDate = (v: string | null) => { setStartDate(v); setDraft({ startDate: v }); };
   const updateDueDate = (v: string | null) => { setDueDate(v); setDraft({ dueDate: v }); };
   const updateLabelIds = (ids: string[]) => { setLabelIds(ids); setDraft({ labelIds: ids }); };
@@ -412,6 +434,7 @@ export function ManualCreatePanel({
     setParentIssueId(undefined);
     setStage(null);
     setChildIssues([]);
+    setFDLProfileId(undefined);
     setDraft({
       title: "",
       description: "",
@@ -443,6 +466,10 @@ export function ManualCreatePanel({
       return;
     }
     if (uploadGate.isBlocked()) return;
+    if (fdlProfileId && !fdlEligible) {
+      toast.error(t(($) => $.create_issue.fdl.project_required));
+      return;
+    }
     submittingRef.current = true;
     setSubmitting(true);
     try {
@@ -455,8 +482,8 @@ export function ManualCreatePanel({
         description,
         status,
         priority,
-        assignee_type: assigneeType,
-        assignee_id: assigneeId,
+        assignee_type: fdlProfileId ? undefined : assigneeType,
+        assignee_id: fdlProfileId ? undefined : assigneeId,
         start_date: startDate || undefined,
         due_date: dueDate || undefined,
         attachment_ids: activeAttachmentIds.length > 0 ? activeAttachmentIds : undefined,
@@ -470,6 +497,7 @@ export function ManualCreatePanel({
         // Stage is only meaningful for a sub-issue (relative to its siblings).
         stage: parentIssueId && stage != null ? stage : undefined,
         project_id: projectId,
+        fdl_profile_id: fdlProfileId,
       });
 
       // Custom-property values can only be addressed once the issue has an
@@ -837,7 +865,7 @@ export function ManualCreatePanel({
 
             {/* Pre-trigger preview — a passive caption above the toolbar; reveals
                 when an agent assignee will pick the issue up. */}
-            <CreateRunHint assigneeType={assigneeType} assigneeId={assigneeId} status={status} />
+            {!fdlProfileId && <CreateRunHint assigneeType={assigneeType} assigneeId={assigneeId} status={status} />}
 
             {/* Property toolbar — each field renders per the Settings → Issue
                 selection (see showField above). */}
@@ -907,6 +935,38 @@ export function ManualCreatePanel({
                   open={fieldPickerOpen === "project" ? true : undefined}
                   onOpenChange={(open) => setFieldPickerOpen(open ? "project" : null)}
                 />
+              )}
+
+              {/* FDL mode is available only after a project selects a clean
+                  code worktree. The server freezes that worktree and profile
+                  when the Issue is created; Squad mode remains the default
+                  for open-ended collaboration. */}
+              {fdlEligible && fdlProfiles.length > 0 && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <PillButton aria-label={t(($) => $.create_issue.fdl.aria)}>
+                        <Workflow className="size-3.5" />
+                        <span>{selectedFDLProfile?.name ?? t(($) => $.create_issue.fdl.squad_mode)}</span>
+                      </PillButton>
+                    }
+                  />
+                  <DropdownMenuContent align="start" className="w-64">
+                    <DropdownMenuItem onClick={() => setFDLProfileId(undefined)}>
+                      <Workflow className="size-3.5" />
+                      <span>{t(($) => $.create_issue.fdl.squad_mode)}</span>
+                      {!fdlProfileId && <Check className="ml-auto size-3.5" />}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    {fdlProfiles.map((profile) => (
+                      <DropdownMenuItem key={profile.id} onClick={() => setFDLProfileId(profile.id)}>
+                        <Workflow className="size-3.5" />
+                        <span className="min-w-0 flex-1 truncate">{profile.name}</span>
+                        {fdlProfileId === profile.id && <Check className="ml-auto size-3.5" />}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               )}
 
               {/* Stage — only relevant when creating a sub-issue under a parent */}

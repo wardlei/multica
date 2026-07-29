@@ -1590,6 +1590,9 @@ type claimBuildFailure struct {
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
+	// FDL direct tasks must not enter the normal issue/comment coordination
+	// path. This safe boolean has no Controller identity or token material.
+	resp.FDLDirect = service.IsFDLDirectTask(*task)
 	supportsCoalescedComments := requestHasClientCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)
 	// Empty-but-non-nil so pgx persists '{}' rather than NULL for tasks without
 	// comment input. Comment tasks replace this with the ids actually embedded
@@ -2907,15 +2910,17 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.emitIssueExecutedOnFirstCompletion(r, task)
+	if !service.IsFDLDirectTask(*task) {
+		h.emitIssueExecutedOnFirstCompletion(r, task)
 
-	// MUL-4195: guarantee at-least-once processing. If a member posted a
-	// deliberate comment while this run was executing (or one was merged into
-	// it after its context was built), schedule a single follow-up so the
-	// input is never silently dropped. Loop-safe: member-authored only, capped
-	// by the existing per-(issue, agent) dedup, and terminating because the
-	// triggering comment always predates the follow-up run's started_at.
-	h.reconcileCommentsOnCompletion(r.Context(), task)
+		// MUL-4195: guarantee at-least-once processing. If a member posted a
+		// deliberate comment while this run was executing (or one was merged into
+		// it after its context was built), schedule a single follow-up so the
+		// input is never silently dropped. Loop-safe: member-authored only, capped
+		// by the existing per-(issue, agent) dedup, and terminating because the
+		// triggering comment always predates the follow-up run's started_at.
+		h.reconcileCommentsOnCompletion(r.Context(), task)
+	}
 	// The terminal transaction and completion reconciliation are committed.
 	// Wake the owning runtime now so queued work that was blocked by this
 	// task's agent capacity or serialization key is re-claimed immediately.

@@ -179,6 +179,11 @@
     "set_project": "프로젝트 설정...",
     "customize_fields": "필드 사용자 지정...",
     "custom_properties": "사용자 지정 속성",
+    "fdl": {
+      "aria": "전달 모드 선택",
+      "squad_mode": "스쿼드 협업",
+      "project_required": "FDL 전달에는 깨끗한 코드 worktree가 연결된 프로젝트가 필요합니다."
+    },
     "remove_parent": "상위 이슈 제거",
     "set_parent_picker": {
       "title": "상위 이슈 설정",

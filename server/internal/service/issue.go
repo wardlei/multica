@@ -77,6 +77,19 @@ type IssueCreateParams struct {
 	// Stage groups this issue into an ordered barrier group under its parent
 	// (NULL = unstaged). See issue_child_done.go for the staged-barrier wake.
 	Stage pgtype.Int4
+	// FDL is non-nil only for an Issue admitted to an immutable FDL Delivery
+	// Profile. Its external run root and submission tokens remain local to the
+	// executor and are deliberately absent from this server-side mirror.
+	FDL *FDLIssueRunCreateParams
+}
+
+// FDLIssueRunCreateParams is the frozen launch contract for one FDL issue.
+type FDLIssueRunCreateParams struct {
+	ProfileID        pgtype.UUID
+	ProfileSnapshot  []byte
+	WorktreeSnapshot []byte
+	RuntimeSnapshot  []byte
+	IssueSnapshot    []byte
 }
 
 // IssueCreateOpts groups optional knobs for IssueService.Create. Most
@@ -155,6 +168,7 @@ type IssueCreateResult struct {
 	// new issue already labeled and a new client can detect that the backend
 	// understood label_ids (see the create handler's compatibility contract).
 	Labels         []db.IssueLabel
+	FDLRun         *db.FdlIssueRun
 	DuplicateIssue *db.Issue
 }
 
@@ -299,6 +313,31 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		return IssueCreateResult{}, fmt.Errorf("create issue: %w", err)
 	}
 
+	var fdlRun *db.FdlIssueRun
+	if p.FDL != nil {
+		issue, err = qtx.EnableIssueFDL(ctx, db.EnableIssueFDLParams{
+			ID:          issue.ID,
+			WorkspaceID: p.WorkspaceID,
+		})
+		if err != nil {
+			return IssueCreateResult{}, fmt.Errorf("enable issue fdl: %w", err)
+		}
+		run, err := qtx.CreateFDLIssueRun(ctx, db.CreateFDLIssueRunParams{
+			WorkspaceID:      p.WorkspaceID,
+			IssueID:          issue.ID,
+			ProfileID:        p.FDL.ProfileID,
+			ProfileSnapshot:  p.FDL.ProfileSnapshot,
+			WorktreeSnapshot: p.FDL.WorktreeSnapshot,
+			RuntimeSnapshot:  p.FDL.RuntimeSnapshot,
+			IssueSnapshot:    p.FDL.IssueSnapshot,
+			CreatedBy:        p.CreatorID,
+		})
+		if err != nil {
+			return IssueCreateResult{}, fmt.Errorf("create fdl issue run: %w", err)
+		}
+		fdlRun = &run
+	}
+
 	// Attach labels inside the create transaction so the issue and its
 	// labels commit together — the old flow created the issue first and
 	// attached labels in a second, non-atomic round-trip whose partial
@@ -330,7 +369,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	s.captureCreatedAnalytics(issue, p.CreatorType, actorID, opts)
 	s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID)
 
-	return IssueCreateResult{Issue: issue, Attachments: attachments, Labels: labels}, nil
+	return IssueCreateResult{Issue: issue, Attachments: attachments, Labels: labels, FDLRun: fdlRun}, nil
 }
 
 // validateIssueLabels checks that every requested label exists in the
@@ -479,6 +518,12 @@ func classifyOrigin(issue db.Issue, opts IssueCreateOpts) (source, taskID, autop
 }
 
 func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue, creatorType, actorID string) {
+	// FDL owns all phase dispatch through its local executor. Letting the
+	// legacy assignment trigger enqueue a squad leader here would create two
+	// competing orchestrators for the same issue.
+	if issue.OrchestrationMode == "fdl" {
+		return
+	}
 	if !issue.AssigneeType.Valid || !issue.AssigneeID.Valid {
 		return
 	}
