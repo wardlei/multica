@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,6 +92,23 @@ func TestFDLDispatchAcknowledgementCoversTasksAndFailures(t *testing.T) {
 	}
 	if byID["preflight"]["status"] != "dispatch_failed" || byID["implement"]["status"] != "acknowledged" || byID["review"]["status"] != "acknowledged" {
 		t.Fatalf("acknowledgement statuses = %#v", byID)
+	}
+}
+
+func TestFDLDispatchFaultIsOptIn(t *testing.T) {
+	d := &Daemon{}
+	if err := d.fdlDispatchFault("after_acknowledgement"); err != nil {
+		t.Fatalf("nil fault hook returned %v", err)
+	}
+	want := errors.New("simulated daemon crash")
+	d.fdlDispatchCheckpoint = func(point string) error {
+		if point != "after_activation" {
+			t.Fatalf("fault point = %q", point)
+		}
+		return want
+	}
+	if err := d.fdlDispatchFault("after_activation"); !errors.Is(err, want) {
+		t.Fatalf("fault hook error = %v, want %v", err, want)
 	}
 }
 

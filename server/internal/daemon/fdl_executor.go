@@ -405,6 +405,9 @@ func (d *Daemon) terminateFDLRun(ctx context.Context, run PendingFDLIssueRun) er
 		if err := writeFDLExecutorJSON(receiptPath, receipt); err != nil {
 			return err
 		}
+		if err := d.fdlDispatchFault("after_acknowledgement"); err != nil {
+			return err
+		}
 	}
 	if !receipt.Terminated {
 		if err := d.runFDLCommand(ctx, "terminate-run", "--run-root", filepath.Join(d.cfg.FDLRunRoot, run.ID), "--status", "cancelled", "--reason", "Issue cancelled in Multica", "--operation-id", receipt.OperationID); err != nil {
@@ -1000,6 +1003,9 @@ func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID, runtimeID 
 		if err := d.client.ActivateFDLAgentTask(ctx, runtimeID, runID, receipt.TaskIDs[workItemID]); err != nil {
 			return fmt.Errorf("activate FDL task for %s: %w", workItemID, err)
 		}
+		if err := d.fdlDispatchFault("after_activation"); err != nil {
+			return err
+		}
 		var binding fdlWorkItemBinding
 		if found, err := readFDLExecutorJSON(d.fdlBindingPath(runID, workItemID), &binding); err != nil {
 			return fmt.Errorf("read FDL binding for activation: %w", err)
@@ -1018,6 +1024,13 @@ func (d *Daemon) activateFDLDispatchTasks(ctx context.Context, runID, runtimeID 
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) fdlDispatchFault(point string) error {
+	if d.fdlDispatchCheckpoint == nil {
+		return nil
+	}
+	return d.fdlDispatchCheckpoint(point)
 }
 
 // recoverFDLDispatchReceipt finishes only work whose Controller acknowledgement

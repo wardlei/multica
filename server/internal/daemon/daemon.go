@@ -304,6 +304,10 @@ type Daemon struct {
 	activeTasks   atomic.Int64       // number of tasks currently in handleTask; exposed via /health
 	ready         atomic.Bool        // false until preflight completes; gates /health status (starting -> running)
 
+	// fdlDispatchCheckpoint is test-only fault injection around durable FDL
+	// dispatch boundaries. Production daemons leave it nil.
+	fdlDispatchCheckpoint func(point string) error
+
 	// claimMu guards pauseClaims and claimsInFlight. It is held only for the
 	// microseconds it takes to make a decision; ClaimTask itself runs without
 	// the lock so a slow per-runtime claim cannot stall auto-update or any
