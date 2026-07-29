@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,6 +152,31 @@ func TestFDLIsolatedWorkspaceRejectsWritableTree(t *testing.T) {
 	if _, err := codeWorktreeAssignmentForTask(Task{WorktreeContext: context}, "daemon-fdl"); err == nil || !strings.Contains(err.Error(), "writable") {
 		t.Fatalf("writable FDL isolated workspace was accepted: %v", err)
 	}
+}
+
+func TestFDLReadOnlyWorkspaceSkipsWriteProbe(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "snapshot.txt"), []byte("frozen\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	canonical, err := resolveRealPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := json.Marshal(fdlIsolatedWorkspaceContext{SchemaVersion: 1, Kind: "fdl_isolated_workspace", DaemonID: "daemon-fdl", LocalPath: root, CanonicalPath: canonical, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{DaemonID: "daemon-fdl"}, localPathLocks: NewLocalPathLocker()}
+	release, abort := d.acquireLocalDirectoryLockIfNeeded(context.Background(), Task{ID: "fdl-readonly", WorktreeContext: workspace}, slog.Default())
+	if abort || release == nil {
+		t.Fatalf("read-only FDL workspace was rejected: abort=%v release=%v", abort, release != nil)
+	}
+	release()
 }
 
 func TestMaterializeFDLExplorerWorkspaceRejectsSymlink(t *testing.T) {

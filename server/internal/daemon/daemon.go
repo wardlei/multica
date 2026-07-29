@@ -3443,17 +3443,22 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		return nil, false
 	}
 	taskLog = taskLog.With("local_directory", assignment.AbsPath)
-	if err := validateLocalPath(assignment.AbsPath); err != nil {
-		taskLog.Error("local_directory: path validation failed", "error", err)
-		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
-			kind:          terminalTaskReportFail,
-			taskID:        task.ID,
-			errorMessage:  err.Error(),
-			failureReason: failureReason,
-		}); failErr != nil {
-			taskLog.Error("fail task after local_directory validation error", "error", failErr)
+	// FDL evidence workspaces are deliberately immutable. Their dedicated
+	// resolver already verifies readability, canonical identity, and that every
+	// entry is non-writable, so the ordinary write probe would reject them.
+	if !assignment.ReadOnly {
+		if err := validateLocalPath(assignment.AbsPath); err != nil {
+			taskLog.Error("local_directory: path validation failed", "error", err)
+			if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+				kind:          terminalTaskReportFail,
+				taskID:        task.ID,
+				errorMessage:  err.Error(),
+				failureReason: failureReason,
+			}); failErr != nil {
+				taskLog.Error("fail task after local_directory validation error", "error", failErr)
+			}
+			return nil, true
 		}
-		return nil, true
 	}
 
 	// While the lock is contended the daemon would otherwise sit blocked on
