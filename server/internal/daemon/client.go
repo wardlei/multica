@@ -532,13 +532,17 @@ func (c *Client) ReportFDLIssueRunRecovery(ctx context.Context, id, reason strin
 
 // CreateFDLAgentTask sends a token-free direct dispatch. The caller retains
 // Controller work-item IDs, submission tokens, and result-directory bindings.
-func (c *Client) CreateFDLAgentTask(ctx context.Context, runID, role, instructions, dispatchKey string, priority int32) (string, error) {
+func (c *Client) CreateFDLAgentTask(ctx context.Context, runID, role, instructions, dispatchKey string, priority int32, executionWorkspace json.RawMessage) (string, error) {
 	var response struct {
 		TaskID string `json:"task_id"`
 	}
-	if err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks", runID), map[string]any{
+	request := map[string]any{
 		"role": role, "instructions": instructions, "dispatch_key": dispatchKey, "priority": priority,
-	}, &response); err != nil {
+	}
+	if len(executionWorkspace) > 0 {
+		request["execution_workspace"] = json.RawMessage(executionWorkspace)
+	}
+	if err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks", runID), request, &response); err != nil {
 		return "", err
 	}
 	if response.TaskID == "" {

@@ -146,6 +146,13 @@ func (d *Daemon) initializeFDLRun(ctx context.Context, run PendingFDLIssueRun) e
 	if !isFDLExternalRoot(d.cfg.FDLRunRoot, worktree.LocalPath) {
 		return fmt.Errorf("FDL run root must be outside the frozen worktree")
 	}
+	stateDir := d.fdlExecutorStateDir(run.ID)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("create FDL executor state directory: %w", err)
+	}
+	if err := writeFDLExecutorJSON(filepath.Join(stateDir, "worktree.json"), fdlExecutorWorktree{SchemaVersion: 1, LocalPath: worktree.LocalPath}); err != nil {
+		return fmt.Errorf("persist frozen FDL worktree binding: %w", err)
+	}
 
 	// The controller config is frozen server-side without a local path. Only
 	// this executor derives repo_root from the daemon-bound worktree.
@@ -479,7 +486,9 @@ type fdlDispatchPayload struct {
 		Role  string `json:"role"`
 		Phase string `json:"phase"`
 	} `json:"attempt"`
-	Instructions json.RawMessage `json:"instructions"`
+	Instructions  json.RawMessage            `json:"instructions"`
+	InputHashes   map[string]string          `json:"input_hashes"`
+	InputEvidence map[string]json.RawMessage `json:"input_evidence"`
 }
 
 // dispatchFDLMailbox is the durable bridge for one Controller dispatch action:
@@ -571,7 +580,17 @@ func (d *Daemon) createFDLDispatchTasks(ctx context.Context, runID string, bindi
 		if err != nil {
 			return err
 		}
-		taskID, err := d.client.CreateFDLAgentTask(ctx, runID, role, instructions, binding.DispatchKey, 0)
+		executionWorkspace, err := d.materializeFDLExecutionWorkspace(runID, binding, payload)
+		if err != nil {
+			binding.State = "dispatch_failed"
+			binding.DispatchError = boundedFDLError(err)
+			binding.UpdatedAt = time.Now().UTC()
+			if writeErr := writeFDLExecutorJSON(d.fdlBindingPath(runID, binding.WorkItemID), binding); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
+		taskID, err := d.client.CreateFDLAgentTask(ctx, runID, role, instructions, binding.DispatchKey, 0, executionWorkspace)
 		if err != nil {
 			// A rejected frozen runtime/role cannot become valid through a blind
 			// retry. Report it as a declared dispatch failure; transport errors

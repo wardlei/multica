@@ -4358,6 +4358,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 		if localAssignment != nil {
 			prepParams.LocalWorkDir = localAssignment.AbsPath
+			prepParams.ReadOnlyLocalWorkDir = localAssignment.ReadOnly
 		}
 		env, err = d.prepareExecutionEnvironment(prepareCtx, prepParams)
 		if err != nil {
@@ -4411,9 +4412,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
-	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
-	if err != nil {
-		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+	runtimeBrief := ""
+	if !env.ReadOnlyLocalDirectory {
+		var err error
+		runtimeBrief, err = execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
+		if err != nil {
+			d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+		}
 	}
 	// Workdir is preserved for reuse by future tasks on the same (agent,
 	// issue) pair in cloud mode; the work_dir path is stored in DB on task
@@ -4427,7 +4432,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// up stale Multica instructions (issue id, trigger comment id, reply
 	// rules) and start acting on the previous task's context. Excise the
 	// marker block on the way out instead.
-	if env.LocalDirectory {
+	if env.LocalDirectory && !env.ReadOnlyLocalDirectory {
 		defer func() {
 			if cerr := execenv.CleanupRuntimeConfig(env.WorkDir, provider); cerr != nil {
 				d.logger.Warn("execenv: cleanup runtime config failed (non-fatal)", "error", cerr)

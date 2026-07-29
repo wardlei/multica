@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -62,9 +64,30 @@ type codeWorktreeContext struct {
 	MustBeClean     bool   `json:"must_be_clean"`
 }
 
+// fdlIsolatedWorkspaceContext is a daemon-local execution projection. Unlike
+// codeWorktreeContext it deliberately has no Git identity: reviewers and
+// explorers receive a frozen materialization, not the live repository.
+type fdlIsolatedWorkspaceContext struct {
+	SchemaVersion int    `json:"schema_version"`
+	Kind          string `json:"kind"`
+	DaemonID      string `json:"daemon_id"`
+	LocalPath     string `json:"local_path"`
+	CanonicalPath string `json:"canonical_path"`
+	ReadOnly      bool   `json:"read_only"`
+}
+
 func codeWorktreeAssignmentForTask(task Task, daemonID string) (*localDirectoryAssignment, error) {
 	if len(task.WorktreeContext) == 0 || string(task.WorktreeContext) == "{}" {
 		return localDirectoryAssignmentForTask(task, daemonID)
+	}
+	var kind struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(task.WorktreeContext, &kind); err != nil {
+		return nil, fmt.Errorf("worktree_preflight_error: parse task context: %w", err)
+	}
+	if kind.Kind == "fdl_isolated_workspace" {
+		return fdlIsolatedWorkspaceAssignment(task.WorktreeContext, daemonID)
 	}
 	var expected codeWorktreeContext
 	if err := json.Unmarshal(task.WorktreeContext, &expected); err != nil {
@@ -91,6 +114,53 @@ func codeWorktreeAssignmentForTask(task Task, daemonID string) (*localDirectoryA
 		return nil, err
 	}
 	return &localDirectoryAssignment{AbsPath: absPath, RealPath: realPath}, nil
+}
+
+func fdlIsolatedWorkspaceAssignment(raw json.RawMessage, daemonID string) (*localDirectoryAssignment, error) {
+	var expected fdlIsolatedWorkspaceContext
+	if err := json.Unmarshal(raw, &expected); err != nil {
+		return nil, fmt.Errorf("worktree_preflight_error: parse FDL isolated workspace: %w", err)
+	}
+	if expected.SchemaVersion != 1 || expected.Kind != "fdl_isolated_workspace" || !expected.ReadOnly || expected.DaemonID == "" || expected.DaemonID != daemonID {
+		return nil, fmt.Errorf("worktree_preflight_error: invalid FDL isolated workspace contract")
+	}
+	absPath, err := normalizeLocalPath(expected.LocalPath)
+	if err != nil {
+		return nil, fmt.Errorf("worktree_preflight_error: %w", err)
+	}
+	realPath, err := resolveRealPath(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("worktree_preflight_error: %w", err)
+	}
+	if realPath != expected.CanonicalPath {
+		return nil, fmt.Errorf("worktree_preflight_error: FDL isolated workspace drift: got %q, want %q", realPath, expected.CanonicalPath)
+	}
+	if err := verifyFDLReadOnlyWorkspace(absPath); err != nil {
+		return nil, err
+	}
+	return &localDirectoryAssignment{AbsPath: absPath, RealPath: realPath, ReadOnly: true}, nil
+}
+
+func verifyFDLReadOnlyWorkspace(root string) error {
+	if reason, blocked := isBlacklistedLocalPath(root); blocked {
+		return fmt.Errorf("worktree_preflight_error: FDL isolated workspace %s", reason)
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("worktree_preflight_error: read FDL isolated workspace: %w", err)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("worktree_preflight_error: FDL isolated workspace contains symlink %q", path)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("worktree_preflight_error: inspect FDL isolated workspace: %w", err)
+		}
+		if info.Mode().Perm()&0o222 != 0 {
+			return fmt.Errorf("worktree_preflight_error: FDL isolated workspace is writable at %q", path)
+		}
+		return nil
+	})
 }
 
 func verifyCodeWorktree(dir string, expected codeWorktreeContext) error {

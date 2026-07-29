@@ -285,6 +285,35 @@ func TestDaemonFDLRunLifecycleIsWorktreeBoundAndSnapshotsIssue(t *testing.T) {
 		t.Fatalf("UpdateFDLIssueRunProjectionForDaemon: expected 200, got %d: %s", projectionRecorder.Code, projectionRecorder.Body.String())
 	}
 
+	missingIsolationRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/tasks", strings.NewReader(`{"role":"reviewer:correctness","instructions":"Review only the supplied snapshot.","dispatch_key":"multica-review-without-isolation-001","execution_workspace":null}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
+	missingIsolationRecorder := httptest.NewRecorder()
+	testHandler.CreateFDLAgentTaskForDaemon(missingIsolationRecorder, missingIsolationRequest)
+	if missingIsolationRecorder.Code != http.StatusConflict {
+		t.Fatalf("FDL reviewer without isolation: expected 409, got %d: %s", missingIsolationRecorder.Code, missingIsolationRecorder.Body.String())
+	}
+
+	isolationContract := `{"schema_version":1,"kind":"fdl_isolated_workspace","daemon_id":"fdl-delivery-test-daemon","local_path":"/tmp/fdl-isolated-review","canonical_path":"/tmp/fdl-isolated-review","read_only":true}`
+	reviewerRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/tasks", strings.NewReader(`{"role":"reviewer:correctness","instructions":"Review only the supplied snapshot.","dispatch_key":"multica-review-isolated-001","execution_workspace":`+isolationContract+`}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
+	reviewerRecorder := httptest.NewRecorder()
+	testHandler.CreateFDLAgentTaskForDaemon(reviewerRecorder, reviewerRequest)
+	if reviewerRecorder.Code != http.StatusCreated {
+		t.Fatalf("Create isolated FDL reviewer task: expected 201, got %d: %s", reviewerRecorder.Code, reviewerRecorder.Body.String())
+	}
+	var reviewerTaskID string
+	if err := json.NewDecoder(reviewerRecorder.Body).Decode(&struct {
+		TaskID *string `json:"task_id"`
+	}{TaskID: &reviewerTaskID}); err != nil || reviewerTaskID == "" {
+		t.Fatalf("decode isolated reviewer task: id=%q err=%v", reviewerTaskID, err)
+	}
+	var reviewerWorktreeContext []byte
+	if err := testPool.QueryRow(ctx, `SELECT worktree_context FROM agent_task_queue WHERE id = $1`, reviewerTaskID).Scan(&reviewerWorktreeContext); err != nil {
+		t.Fatalf("load isolated reviewer task context: %v", err)
+	}
+	var reviewerWorkspace map[string]any
+	if err := json.Unmarshal(reviewerWorktreeContext, &reviewerWorkspace); err != nil || reviewerWorkspace["kind"] != "fdl_isolated_workspace" || reviewerWorkspace["local_path"] != "/tmp/fdl-isolated-review" || reviewerWorkspace["read_only"] != true {
+		t.Fatalf("reviewer task did not retain its isolated execution context: %s err=%v", reviewerWorktreeContext, err)
+	}
+
 	directTaskRequest := withURLParam(httptest.NewRequest(http.MethodPost, "/api/daemon/fdl-runs/"+pending.Runs[0].ID+"/tasks", strings.NewReader(`{"role":"intake","instructions":"Prepare the frozen FDL intake report in your assigned result directory.","dispatch_key":"multica-dispatch-test-001"}`)).WithContext(daemonContext), "id", pending.Runs[0].ID)
 	directTaskRecorder := httptest.NewRecorder()
 	testHandler.CreateFDLAgentTaskForDaemon(directTaskRecorder, directTaskRequest)

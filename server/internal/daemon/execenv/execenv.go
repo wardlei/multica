@@ -68,6 +68,10 @@ type PrepareParams struct {
 	// substituted. Used by the local_directory project_resource flow
 	// (MUL-2663). When set, the envRoot/workdir directory is not created.
 	LocalWorkDir string
+	// ReadOnlyLocalWorkDir is used by FDL reviewer/explorer evidence
+	// projections. The executor has already made the tree immutable, so Prepare
+	// must not create context sidecars inside it.
+	ReadOnlyLocalWorkDir bool
 	// HermesSourceHome is the shared Hermes home the per-task overlay is seeded
 	// from — resolved by the daemon via execenv.ResolveHermesProfile so it honors
 	// the agent's custom_env HERMES_HOME and any -p/--profile or sticky selection.
@@ -198,6 +202,9 @@ type Environment struct {
 	// on "may I remove WorkDir as scratch?" must check this — for example
 	// the GC loop never deletes the user's directory.
 	LocalDirectory bool
+	// ReadOnlyLocalDirectory is true for an FDL evidence projection. It is
+	// local-directory-shaped for lifecycle purposes but never receives sidecars.
+	ReadOnlyLocalDirectory bool
 	// CodexHome is the path to the per-task CODEX_HOME directory (set only for codex provider).
 	CodexHome string
 	// ClaudeSettingsPath is a task-local --settings JSON file that applies
@@ -304,10 +311,11 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	}
 
 	env := &Environment{
-		RootDir:        envRoot,
-		WorkDir:        workDir,
-		LocalDirectory: params.LocalWorkDir != "",
-		logger:         logger,
+		RootDir:                envRoot,
+		WorkDir:                workDir,
+		LocalDirectory:         params.LocalWorkDir != "",
+		ReadOnlyLocalDirectory: params.ReadOnlyLocalWorkDir,
+		logger:                 logger,
 	}
 
 	// Write context files into workdir (skills go to provider-native paths).
@@ -318,8 +326,10 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// and avoids a conditional that would silently disable cleanup if the
 	// local_directory detection logic ever drifts.
 	manifest := &sidecarManifest{}
-	if err := writeContextFiles(workDir, params.Provider, params.Task, manifest); err != nil {
-		return nil, fmt.Errorf("execenv: write context files: %w", err)
+	if !params.ReadOnlyLocalWorkDir {
+		if err := writeContextFiles(workDir, params.Provider, params.Task, manifest); err != nil {
+			return nil, fmt.Errorf("execenv: write context files: %w", err)
+		}
 	}
 
 	// Persist managed-env provenance for non-local issue envs at Prepare time
@@ -388,7 +398,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// still reads ~/.cursor/mcp.json, but only servers with approval entries in
 	// this per-task data dir can load, so user-global MCP servers do not leak
 	// into managed-MCP runs.
-	if params.Provider == "cursor" {
+	if params.Provider == "cursor" && !params.ReadOnlyLocalWorkDir {
 		cursorDataDir, err := prepareCursorMcpConfig(envRoot, workDir, params.McpConfig, params.CursorMcpAuthSource, manifest)
 		if err != nil {
 			return nil, fmt.Errorf("execenv: prepare cursor mcp config: %w", err)

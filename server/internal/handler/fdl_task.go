@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -11,10 +12,20 @@ import (
 )
 
 type fdlDirectTaskRequest struct {
-	Role         string `json:"role"`
-	Instructions string `json:"instructions"`
-	DispatchKey  string `json:"dispatch_key"`
-	Priority     int32  `json:"priority,omitempty"`
+	Role               string          `json:"role"`
+	Instructions       string          `json:"instructions"`
+	DispatchKey        string          `json:"dispatch_key"`
+	Priority           int32           `json:"priority,omitempty"`
+	ExecutionWorkspace json.RawMessage `json:"execution_workspace,omitempty"`
+}
+
+type fdlDaemonWorkspace struct {
+	SchemaVersion int    `json:"schema_version"`
+	Kind          string `json:"kind"`
+	DaemonID      string `json:"daemon_id"`
+	LocalPath     string `json:"local_path"`
+	CanonicalPath string `json:"canonical_path"`
+	ReadOnly      bool   `json:"read_only"`
 }
 
 // CreateFDLAgentTaskForDaemon is the only FDL task ingress. The daemon sends
@@ -107,6 +118,21 @@ func (h *Handler) CreateFDLAgentTaskForDaemon(w http.ResponseWriter, r *http.Req
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "encode FDL worktree context failed")
+		return
+	}
+	hasExecutionWorkspace := len(bytes.TrimSpace(request.ExecutionWorkspace)) > 0 && !bytes.Equal(bytes.TrimSpace(request.ExecutionWorkspace), []byte("null"))
+	if hasExecutionWorkspace {
+		var execution fdlDaemonWorkspace
+		decoder := json.NewDecoder(strings.NewReader(string(request.ExecutionWorkspace)))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&execution) != nil || execution.SchemaVersion != 1 || execution.Kind != "fdl_isolated_workspace" || !execution.ReadOnly || execution.DaemonID != daemonID || execution.LocalPath == "" || execution.CanonicalPath == "" {
+			writeError(w, http.StatusBadRequest, "invalid FDL isolated execution workspace")
+			return
+		}
+		worktreeContext = request.ExecutionWorkspace
+	}
+	if (strings.HasPrefix(request.Role, "reviewer:") || strings.HasPrefix(request.Role, "explorer:")) && !hasExecutionWorkspace {
+		writeError(w, http.StatusConflict, "FDL reviewer and explorer tasks require an isolated workspace")
 		return
 	}
 	task, err := h.Queries.CreateFDLAgentTask(r.Context(), db.CreateFDLAgentTaskParams{
