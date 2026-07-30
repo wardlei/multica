@@ -595,5 +595,17 @@
     "row_backlog_hint": "智能体保持暂停",
     "row_todo_label": "Todo",
     "row_todo_hint": "启动智能体"
+  },
+  "fdl_delivery": {
+    "title": "FDL 交付",
+    "controller_authority": "FDL Controller 负责流程决策与恢复。",
+    "status": "状态",
+    "phase": "阶段",
+    "waiting_reason": "等待原因",
+    "unavailable": "暂时无法读取交付状态投影。",
+    "decision_required": "需要决策",
+    "decision_option": "{{decision}}",
+    "decision_submitted": "已记录 FDL 决策，等待本地执行器处理。",
+    "decision_failed": "记录 FDL 决策失败。"
   }
 }

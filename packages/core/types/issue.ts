@@ -14,6 +14,8 @@ export type IssuePriority = "urgent" | "high" | "medium" | "low" | "none";
 
 export type IssueAssigneeType = "member" | "agent" | "squad";
 
+export type IssueOrchestrationMode = "squad" | "fdl";
+
 export interface IssueReaction {
   id: string;
   issue_id: string;
@@ -48,6 +50,11 @@ export interface Issue {
   creator_id: string;
   parent_issue_id: string | null;
   project_id: string | null;
+  // Optional so installed clients can keep rendering responses from pre-FDL
+  // servers. Parsed current responses always supply "squad" or "fdl".
+  orchestration_mode?: IssueOrchestrationMode;
+  // Null until the local FDL executor has initialized the external run root.
+  fdl_run_id?: string | null;
   position: number;
   // Ordered barrier group among sibling sub-issues (null = unstaged). The
   // parent assignee is notified/woken only when every sub-issue in a stage

@@ -12,6 +12,8 @@ export interface CreateIssueRequest {
   assignee_id?: string;
   parent_issue_id?: string;
   project_id?: string;
+  /** Selects a frozen FDL Delivery Profile for a Controller-owned delivery. */
+  fdl_profile_id?: string;
   /** Ordered stage (>= 1) grouping this sub-issue under its parent. */
   stage?: number;
   start_date?: string;

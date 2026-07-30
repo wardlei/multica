@@ -1,4 +1,5 @@
-export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction } from "./issue";
+export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueOrchestrationMode, IssueMetadata, IssueMetadataValue, IssueReaction } from "./issue";
+export type { FDLDeliveryRole, FDLRoleBinding, FDLDeliveryProfile, CreateFDLDeliveryProfileRequest, UpdateFDLDeliveryProfileRequest, FDLIssueRun } from "./fdl";
 export type {
   Agent,
   AgentStatus,

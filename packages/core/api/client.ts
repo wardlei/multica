@@ -168,6 +168,10 @@ import type {
   CreateBillingCheckoutSessionResponse,
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
+  FDLDeliveryProfile,
+  CreateFDLDeliveryProfileRequest,
+  UpdateFDLDeliveryProfileRequest,
+  FDLIssueRun,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type { CreateFeedbackResponse, FeedbackKind } from "../feedback/types";
@@ -303,6 +307,9 @@ import {
   EMPTY_PROJECT,
   EMPTY_PROJECT_RESOURCE,
   EMPTY_CODE_WORKTREE,
+  FDLDeliveryProfileSchema,
+  FDLDeliveryProfilesSchema,
+  FDLIssueRunSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -2649,6 +2656,69 @@ export class ApiClient {
 
   async deleteSquad(id: string): Promise<void> {
     await this.fetch(`/api/squads/${id}`, { method: "DELETE" });
+  }
+
+  // FDL Delivery Profiles are future-run templates. Starting an Issue freezes
+  // one into a separate run snapshot, so mutating a profile cannot affect a
+  // delivery already in progress.
+  async listFDLDeliveryProfiles(): Promise<FDLDeliveryProfile[]> {
+    const raw = await this.fetch<unknown>("/api/fdl-delivery-profiles");
+    return parseWithFallback(raw, FDLDeliveryProfilesSchema, [], {
+      endpoint: "GET /api/fdl-delivery-profiles",
+    });
+  }
+
+  async getFDLDeliveryProfile(id: string): Promise<FDLDeliveryProfile> {
+    const raw = await this.fetch<unknown>(`/api/fdl-delivery-profiles/${id}`);
+    const profile = parseWithFallback<FDLDeliveryProfile | null>(raw, FDLDeliveryProfileSchema, null, {
+      endpoint: "GET /api/fdl-delivery-profiles/{id}",
+    });
+    if (!profile) throw new Error("invalid FDL Delivery Profile response");
+    return profile;
+  }
+
+  async createFDLDeliveryProfile(data: CreateFDLDeliveryProfileRequest): Promise<FDLDeliveryProfile> {
+    const raw = await this.fetch<unknown>("/api/fdl-delivery-profiles", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const profile = parseWithFallback<FDLDeliveryProfile | null>(raw, FDLDeliveryProfileSchema, null, {
+      endpoint: "POST /api/fdl-delivery-profiles",
+    });
+    if (!profile) throw new Error("invalid FDL Delivery Profile response");
+    return profile;
+  }
+
+  async updateFDLDeliveryProfile(id: string, data: UpdateFDLDeliveryProfileRequest): Promise<FDLDeliveryProfile> {
+    const raw = await this.fetch<unknown>(`/api/fdl-delivery-profiles/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+    const profile = parseWithFallback<FDLDeliveryProfile | null>(raw, FDLDeliveryProfileSchema, null, {
+      endpoint: "PUT /api/fdl-delivery-profiles/{id}",
+    });
+    if (!profile) throw new Error("invalid FDL Delivery Profile response");
+    return profile;
+  }
+
+  async archiveFDLDeliveryProfile(id: string): Promise<void> {
+    await this.fetch(`/api/fdl-delivery-profiles/${id}`, { method: "DELETE" });
+  }
+
+  async getFDLIssueRun(issueId: string): Promise<FDLIssueRun> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/fdl-run`);
+    const run = parseWithFallback<FDLIssueRun | null>(raw, FDLIssueRunSchema, null, {
+      endpoint: "GET /api/issues/{id}/fdl-run",
+    });
+    if (!run) throw new Error("invalid FDL Issue run response");
+    return run;
+  }
+
+  async submitFDLHumanDecision(issueId: string, data: { action_id: string; decision: string }): Promise<void> {
+    await this.fetch(`/api/issues/${issueId}/fdl-run/decisions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
   }
 
   async listSquadMembers(squadId: string): Promise<SquadMember[]> {

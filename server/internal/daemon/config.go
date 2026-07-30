@@ -93,6 +93,10 @@ type Config struct {
 	Profile                        string                // profile name (empty = default)
 	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, qoder, traecli, grok, qwen
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
+	FDLExecutorEnabled             bool                  // opt-in local FDL Controller initializer; disabled unless explicitly configured
+	FDLCLIPath                     string                // absolute feature-delivery-loop scripts/fdl path
+	FDLRunRoot                     string                // absolute root outside all project worktrees
+	FDLPollInterval                time.Duration         // pending FDL run polling cadence
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
 	MaxConcurrentTasks             int                   // max tasks running in parallel (default: 20)
@@ -504,6 +508,18 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	fdlExecutorEnabled := os.Getenv("MULTICA_FDL_EXECUTOR_ENABLED") == "true" || os.Getenv("MULTICA_FDL_EXECUTOR_ENABLED") == "1"
+	fdlCLIPath := strings.TrimSpace(os.Getenv("MULTICA_FDL_CLI"))
+	fdlRunRoot := strings.TrimSpace(os.Getenv("MULTICA_FDL_RUN_ROOT"))
+	fdlPollInterval, err := durationFromEnv("MULTICA_FDL_POLL_INTERVAL", DefaultPollInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	if fdlExecutorEnabled {
+		if !filepath.IsAbs(fdlCLIPath) || !filepath.IsAbs(fdlRunRoot) {
+			return Config{}, fmt.Errorf("MULTICA_FDL_EXECUTOR_ENABLED requires absolute MULTICA_FDL_CLI and MULTICA_FDL_RUN_ROOT")
+		}
+	}
 
 	// Health port: override > default
 	healthPort := DefaultHealthPort
@@ -579,6 +595,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		Profile:                        profile,
 		Agents:                         agents,
 		WorkspacesRoot:                 workspacesRoot,
+		FDLExecutorEnabled:             fdlExecutorEnabled,
+		FDLCLIPath:                     fdlCLIPath,
+		FDLRunRoot:                     fdlRunRoot,
+		FDLPollInterval:                fdlPollInterval,
 		KeepEnvAfterTask:               keepEnv,
 		GCEnabled:                      gcEnabled,
 		GCInterval:                     gcInterval,

@@ -304,6 +304,10 @@ type Daemon struct {
 	activeTasks   atomic.Int64       // number of tasks currently in handleTask; exposed via /health
 	ready         atomic.Bool        // false until preflight completes; gates /health status (starting -> running)
 
+	// fdlDispatchCheckpoint is test-only fault injection around durable FDL
+	// dispatch boundaries. Production daemons leave it nil.
+	fdlDispatchCheckpoint func(point string) error
+
 	// claimMu guards pauseClaims and claimsInFlight. It is held only for the
 	// microseconds it takes to make a decision; ClaimTask itself runs without
 	// the lock so a slow per-runtime claim cannot stall auto-update or any
@@ -399,6 +403,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		reconcile:                 newReconcileBroadcaster(),
 		workspaceChanges:          newWorkspaceChangeSignal(),
 		wsRPC:                     newWSRPCClient(wsRPCResponseGrace),
+		fdlDispatchCheckpoint:     newFDLDispatchCheckpoint(),
 	}
 	d.activeEnvRootsCond = sync.NewCond(&d.activeEnvRootsMu)
 	d.activeCodexStoresCond = sync.NewCond(&d.activeCodexStoresMu)
@@ -1080,6 +1085,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
+	if d.cfg.FDLExecutorEnabled {
+		go d.fdlExecutorLoop(ctx)
+	}
 
 	// Preflight succeeded and the background loops are up: the daemon has
 	// registered its runtimes and can now claim and run tasks. Flip /health
@@ -3440,17 +3448,22 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		return nil, false
 	}
 	taskLog = taskLog.With("local_directory", assignment.AbsPath)
-	if err := validateLocalPath(assignment.AbsPath); err != nil {
-		taskLog.Error("local_directory: path validation failed", "error", err)
-		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
-			kind:          terminalTaskReportFail,
-			taskID:        task.ID,
-			errorMessage:  err.Error(),
-			failureReason: failureReason,
-		}); failErr != nil {
-			taskLog.Error("fail task after local_directory validation error", "error", failErr)
+	// FDL evidence workspaces are deliberately immutable. Their dedicated
+	// resolver already verifies readability, canonical identity, and that every
+	// entry is non-writable, so the ordinary write probe would reject them.
+	if !assignment.ReadOnly {
+		if err := validateLocalPath(assignment.AbsPath); err != nil {
+			taskLog.Error("local_directory: path validation failed", "error", err)
+			if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+				kind:          terminalTaskReportFail,
+				taskID:        task.ID,
+				errorMessage:  err.Error(),
+				failureReason: failureReason,
+			}); failErr != nil {
+				taskLog.Error("fail task after local_directory validation error", "error", failErr)
+			}
+			return nil, true
 		}
-		return nil, true
 	}
 
 	// While the lock is contended the daemon would otherwise sit blocked on
@@ -4355,6 +4368,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 		if localAssignment != nil {
 			prepParams.LocalWorkDir = localAssignment.AbsPath
+			prepParams.ReadOnlyLocalWorkDir = localAssignment.ReadOnly
 		}
 		env, err = d.prepareExecutionEnvironment(prepareCtx, prepParams)
 		if err != nil {
@@ -4408,9 +4422,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
-	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
-	if err != nil {
-		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+	runtimeBrief := ""
+	if !env.ReadOnlyLocalDirectory {
+		var err error
+		runtimeBrief, err = execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
+		if err != nil {
+			d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+		}
 	}
 	// Workdir is preserved for reuse by future tasks on the same (agent,
 	// issue) pair in cloud mode; the work_dir path is stored in DB on task
@@ -4424,7 +4442,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// up stale Multica instructions (issue id, trigger comment id, reply
 	// rules) and start acting on the previous task's context. Excise the
 	// marker block on the way out instead.
-	if env.LocalDirectory {
+	if env.LocalDirectory && !env.ReadOnlyLocalDirectory {
 		defer func() {
 			if cerr := execenv.CleanupRuntimeConfig(env.WorkDir, provider); cerr != nil {
 				d.logger.Warn("execenv: cleanup runtime config failed (non-fatal)", "error", cerr)

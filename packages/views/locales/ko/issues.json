@@ -595,5 +595,17 @@
     "row_backlog_hint": "에이전트를 대기 상태로 유지",
     "row_todo_label": "할 일",
     "row_todo_hint": "에이전트 시작"
+  },
+  "fdl_delivery": {
+    "title": "FDL 전달",
+    "controller_authority": "FDL Controller가 워크플로 결정과 복구를 담당합니다.",
+    "status": "상태",
+    "phase": "단계",
+    "waiting_reason": "대기 사유",
+    "unavailable": "전달 상태 투영을 일시적으로 불러올 수 없습니다.",
+    "decision_required": "결정이 필요합니다",
+    "decision_option": "{{decision}}",
+    "decision_submitted": "로컬 실행자를 위한 FDL 결정을 기록했습니다.",
+    "decision_failed": "FDL 결정을 기록하지 못했습니다."
   }
 }

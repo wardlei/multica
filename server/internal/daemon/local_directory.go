@@ -38,6 +38,9 @@ type localDirectoryAssignment struct {
 	Ref      localDirectoryRef
 	AbsPath  string // user-provided path, cleaned but not symlink-resolved
 	RealPath string // canonical key for the path mutex
+	// ReadOnly is reserved for FDL evidence workspaces. It prevents the daemon
+	// from injecting sidecars and requires a non-writable filesystem tree.
+	ReadOnly bool
 }
 
 // localDirectoryAssignmentForTask returns the local_directory assignment a task

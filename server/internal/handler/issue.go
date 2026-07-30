@@ -44,7 +44,11 @@ type IssueResponse struct {
 	CreatorID     string  `json:"creator_id"`
 	ParentIssueID *string `json:"parent_issue_id"`
 	ProjectID     *string `json:"project_id"`
-	Position      float64 `json:"position"`
+	// OrchestrationMode selects the legacy leader/squad interaction or the
+	// Controller-owned FDL delivery workflow for this issue.
+	OrchestrationMode string  `json:"orchestration_mode"`
+	FDLRunID          *string `json:"fdl_run_id"`
+	Position          float64 `json:"position"`
 	// Stage groups sub-issues under the same parent into ordered barrier
 	// groups (null = unstaged). See issue_child_done.go for how a closed
 	// stage gates the child-done -> parent wake.
@@ -91,28 +95,30 @@ func validateIssueEnum(w http.ResponseWriter, field, value string, allowed []str
 func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:            uuidToString(i.ID),
-		WorkspaceID:   uuidToString(i.WorkspaceID),
-		Number:        i.Number,
-		Identifier:    identifier,
-		Title:         i.Title,
-		Description:   textToPtr(i.Description),
-		Status:        i.Status,
-		Priority:      i.Priority,
-		AssigneeType:  textToPtr(i.AssigneeType),
-		AssigneeID:    uuidToPtr(i.AssigneeID),
-		CreatorType:   i.CreatorType,
-		CreatorID:     uuidToString(i.CreatorID),
-		ParentIssueID: uuidToPtr(i.ParentIssueID),
-		ProjectID:     uuidToPtr(i.ProjectID),
-		Position:      i.Position,
-		Stage:         int4ToPtr(i.Stage),
-		StartDate:     dateToPtr(i.StartDate),
-		DueDate:       dateToPtr(i.DueDate),
-		CreatedAt:     timestampToString(i.CreatedAt),
-		UpdatedAt:     timestampToString(i.UpdatedAt),
-		Metadata:      parseIssueMetadata(i.Metadata),
-		Properties:    parseIssueProperties(i.Properties),
+		ID:                uuidToString(i.ID),
+		WorkspaceID:       uuidToString(i.WorkspaceID),
+		Number:            i.Number,
+		Identifier:        identifier,
+		Title:             i.Title,
+		Description:       textToPtr(i.Description),
+		Status:            i.Status,
+		Priority:          i.Priority,
+		AssigneeType:      textToPtr(i.AssigneeType),
+		AssigneeID:        uuidToPtr(i.AssigneeID),
+		CreatorType:       i.CreatorType,
+		CreatorID:         uuidToString(i.CreatorID),
+		ParentIssueID:     uuidToPtr(i.ParentIssueID),
+		ProjectID:         uuidToPtr(i.ProjectID),
+		OrchestrationMode: i.OrchestrationMode,
+		FDLRunID:          textToPtr(i.FdlRunID),
+		Position:          i.Position,
+		Stage:             int4ToPtr(i.Stage),
+		StartDate:         dateToPtr(i.StartDate),
+		DueDate:           dateToPtr(i.DueDate),
+		CreatedAt:         timestampToString(i.CreatedAt),
+		UpdatedAt:         timestampToString(i.UpdatedAt),
+		Metadata:          parseIssueMetadata(i.Metadata),
+		Properties:        parseIssueProperties(i.Properties),
 	}
 }
 
@@ -120,28 +126,30 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 func issueListRowToResponse(i db.ListIssuesRow, issuePrefix string) IssueResponse {
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:            uuidToString(i.ID),
-		WorkspaceID:   uuidToString(i.WorkspaceID),
-		Number:        i.Number,
-		Identifier:    identifier,
-		Title:         i.Title,
-		Description:   textToPtr(i.Description),
-		Status:        i.Status,
-		Priority:      i.Priority,
-		AssigneeType:  textToPtr(i.AssigneeType),
-		AssigneeID:    uuidToPtr(i.AssigneeID),
-		CreatorType:   i.CreatorType,
-		CreatorID:     uuidToString(i.CreatorID),
-		ParentIssueID: uuidToPtr(i.ParentIssueID),
-		ProjectID:     uuidToPtr(i.ProjectID),
-		Position:      i.Position,
-		Stage:         int4ToPtr(i.Stage),
-		StartDate:     dateToPtr(i.StartDate),
-		DueDate:       dateToPtr(i.DueDate),
-		CreatedAt:     timestampToString(i.CreatedAt),
-		UpdatedAt:     timestampToString(i.UpdatedAt),
-		Metadata:      parseIssueMetadata(i.Metadata),
-		Properties:    parseIssueProperties(i.Properties),
+		ID:                uuidToString(i.ID),
+		WorkspaceID:       uuidToString(i.WorkspaceID),
+		Number:            i.Number,
+		Identifier:        identifier,
+		Title:             i.Title,
+		Description:       textToPtr(i.Description),
+		Status:            i.Status,
+		Priority:          i.Priority,
+		AssigneeType:      textToPtr(i.AssigneeType),
+		AssigneeID:        uuidToPtr(i.AssigneeID),
+		CreatorType:       i.CreatorType,
+		CreatorID:         uuidToString(i.CreatorID),
+		ParentIssueID:     uuidToPtr(i.ParentIssueID),
+		ProjectID:         uuidToPtr(i.ProjectID),
+		OrchestrationMode: i.OrchestrationMode,
+		FDLRunID:          textToPtr(i.FdlRunID),
+		Position:          i.Position,
+		Stage:             int4ToPtr(i.Stage),
+		StartDate:         dateToPtr(i.StartDate),
+		DueDate:           dateToPtr(i.DueDate),
+		CreatedAt:         timestampToString(i.CreatedAt),
+		UpdatedAt:         timestampToString(i.UpdatedAt),
+		Metadata:          parseIssueMetadata(i.Metadata),
+		Properties:        parseIssueProperties(i.Properties),
 	}
 }
 
@@ -181,28 +189,30 @@ func (h *Handler) labelsByIssue(ctx context.Context, wsUUID pgtype.UUID, issueID
 func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueResponse {
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:            uuidToString(i.ID),
-		WorkspaceID:   uuidToString(i.WorkspaceID),
-		Number:        i.Number,
-		Identifier:    identifier,
-		Title:         i.Title,
-		Description:   textToPtr(i.Description),
-		Status:        i.Status,
-		Priority:      i.Priority,
-		AssigneeType:  textToPtr(i.AssigneeType),
-		AssigneeID:    uuidToPtr(i.AssigneeID),
-		CreatorType:   i.CreatorType,
-		CreatorID:     uuidToString(i.CreatorID),
-		ParentIssueID: uuidToPtr(i.ParentIssueID),
-		ProjectID:     uuidToPtr(i.ProjectID),
-		Position:      i.Position,
-		Stage:         int4ToPtr(i.Stage),
-		StartDate:     dateToPtr(i.StartDate),
-		DueDate:       dateToPtr(i.DueDate),
-		CreatedAt:     timestampToString(i.CreatedAt),
-		UpdatedAt:     timestampToString(i.UpdatedAt),
-		Metadata:      parseIssueMetadata(i.Metadata),
-		Properties:    parseIssueProperties(i.Properties),
+		ID:                uuidToString(i.ID),
+		WorkspaceID:       uuidToString(i.WorkspaceID),
+		Number:            i.Number,
+		Identifier:        identifier,
+		Title:             i.Title,
+		Description:       textToPtr(i.Description),
+		Status:            i.Status,
+		Priority:          i.Priority,
+		AssigneeType:      textToPtr(i.AssigneeType),
+		AssigneeID:        uuidToPtr(i.AssigneeID),
+		CreatorType:       i.CreatorType,
+		CreatorID:         uuidToString(i.CreatorID),
+		ParentIssueID:     uuidToPtr(i.ParentIssueID),
+		ProjectID:         uuidToPtr(i.ProjectID),
+		OrchestrationMode: i.OrchestrationMode,
+		FDLRunID:          textToPtr(i.FdlRunID),
+		Position:          i.Position,
+		Stage:             int4ToPtr(i.Stage),
+		StartDate:         dateToPtr(i.StartDate),
+		DueDate:           dateToPtr(i.DueDate),
+		CreatedAt:         timestampToString(i.CreatedAt),
+		UpdatedAt:         timestampToString(i.UpdatedAt),
+		Metadata:          parseIssueMetadata(i.Metadata),
+		Properties:        parseIssueProperties(i.Properties),
 	}
 }
 
@@ -2370,14 +2380,18 @@ func readRuntimeCLIVersion(metadata []byte) string {
 }
 
 type CreateIssueRequest struct {
-	Title         string   `json:"title"`
-	Description   *string  `json:"description"`
-	Status        string   `json:"status"`
-	Priority      string   `json:"priority"`
-	AssigneeType  *string  `json:"assignee_type"`
-	AssigneeID    *string  `json:"assignee_id"`
-	ParentIssueID *string  `json:"parent_issue_id"`
-	ProjectID     *string  `json:"project_id"`
+	Title         string  `json:"title"`
+	Description   *string `json:"description"`
+	Status        string  `json:"status"`
+	Priority      string  `json:"priority"`
+	AssigneeType  *string `json:"assignee_type"`
+	AssigneeID    *string `json:"assignee_id"`
+	ParentIssueID *string `json:"parent_issue_id"`
+	ProjectID     *string `json:"project_id"`
+	// FDLProfileID selects a Delivery Profile. Its profile/worktree/runtime
+	// snapshot is frozen with the issue; changing the profile later cannot
+	// redirect the active Controller run.
+	FDLProfileID  *string  `json:"fdl_profile_id,omitempty"`
 	Stage         *int32   `json:"stage,omitempty"`
 	StartDate     *string  `json:"start_date"`
 	DueDate       *string  `json:"due_date"`
@@ -2395,6 +2409,50 @@ type CreateIssueRequest struct {
 	OriginID   *string `json:"origin_id,omitempty"`
 
 	AllowDuplicate bool `json:"allow_duplicate,omitempty"`
+}
+
+// quickCreateAssignee returns the squad stored on the trusted quick-create
+// task when the issuing agent is acting as that task's execution carrier.
+// A quick-create task is agent-scoped for daemon dispatch, but its SquadID
+// records the user's actual assignment target and must win over CLI arguments.
+func (h *Handler) quickCreateAssignee(ctx context.Context, r *http.Request, workspaceID pgtype.UUID, creatorType, creatorID string, originID pgtype.UUID, assigneeType pgtype.Text, assigneeID pgtype.UUID) (pgtype.Text, pgtype.UUID, string) {
+	if creatorType != "agent" {
+		return assigneeType, assigneeID, ""
+	}
+
+	taskID, err := util.ParseUUID(r.Header.Get("X-Task-ID"))
+	if err != nil || taskID != originID {
+		// The task-scoped token normally supplies this header. Preserve the
+		// existing behavior for non-daemon callers that merely use the
+		// quick_create origin marker without a matching execution task.
+		return assigneeType, assigneeID, ""
+	}
+	task, err := h.Queries.GetAgentTask(ctx, taskID)
+	if err != nil || uuidToString(task.AgentID) != creatorID {
+		return assigneeType, assigneeID, ""
+	}
+
+	var qc service.QuickCreateContext
+	if err := json.Unmarshal(task.Context, &qc); err != nil || qc.Type != service.QuickCreateContextType || qc.SquadID == "" {
+		return assigneeType, assigneeID, ""
+	}
+	if qc.WorkspaceID != uuidToString(workspaceID) {
+		return assigneeType, assigneeID, "quick-create task does not belong to this workspace"
+	}
+
+	squadID, err := util.ParseUUID(qc.SquadID)
+	if err != nil {
+		return assigneeType, assigneeID, "quick-create task has an invalid squad"
+	}
+	squad, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+		ID:          squadID,
+		WorkspaceID: workspaceID,
+	})
+	if err != nil || squad.ArchivedAt.Valid {
+		return assigneeType, assigneeID, "quick-create squad is no longer available"
+	}
+
+	return pgtype.Text{String: "squad", Valid: true}, squad.ID, ""
 }
 
 func duplicateIssueMessage(issue IssueResponse) string {
@@ -2457,11 +2515,6 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		assigneeID = id
 	}
 
-	if status, msg := h.validateAssigneePair(r.Context(), r, workspaceID, assigneeType, assigneeID); status != 0 {
-		writeError(w, status, msg)
-		return
-	}
-
 	var parentIssueID pgtype.UUID
 	var projectID pgtype.UUID
 	if req.ProjectID != nil {
@@ -2516,6 +2569,51 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	// Determine creator identity: agent (via X-Agent-ID header) or member.
 	creatorType, actualCreatorID := h.resolveActor(r, creatorID, workspaceID)
 
+	var fdlLaunch *service.FDLIssueRunCreateParams
+	if req.FDLProfileID != nil {
+		if creatorType != "member" {
+			writeError(w, http.StatusForbidden, "only a workspace member can start an FDL delivery")
+			return
+		}
+		if !projectID.Valid {
+			writeError(w, http.StatusBadRequest, "FDL delivery requires project_id with a code worktree")
+			return
+		}
+		member, ok := h.workspaceMember(w, r, workspaceID)
+		if !ok {
+			return
+		}
+		profileID, ok := parseUUIDOrBadRequest(w, *req.FDLProfileID, "fdl_profile_id")
+		if !ok {
+			return
+		}
+		launch, profile, err := h.prepareFDLIssueRun(r.Context(), wsUUID, profileID, projectID, member)
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		// An FDL run belongs visibly to its profile squad, but that squad never
+		// receives a leader task: Controller dispatch begins only after init.
+		if assigneeType.Valid && (assigneeType.String != "squad" || assigneeID != profile.SquadID) {
+			writeError(w, http.StatusBadRequest, "FDL delivery assignee must match the Delivery Profile squad")
+			return
+		}
+		assigneeType = pgtype.Text{String: "squad", Valid: true}
+		assigneeID = profile.SquadID
+		issueSnapshot, err := json.Marshal(map[string]any{
+			"title":       req.Title,
+			"description": req.Description,
+			"priority":    priority,
+			"project_id":  uuidToString(projectID),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "serialize FDL Issue snapshot failed")
+			return
+		}
+		launch.IssueSnapshot = issueSnapshot
+		fdlLaunch = &launch
+	}
+
 	// Optional origin stamping (quick-create / autopilot). Only the
 	// allowed origin types are accepted; anything else is rejected so a
 	// rogue caller can't mint arbitrary origin labels. Both fields must
@@ -2567,6 +2665,25 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A quick-create task may be dispatched to a squad leader, but that leader
+	// is only the execution carrier. The task context is the authoritative
+	// record of the assignee the user selected. Do not let an agent accidentally
+	// turn a squad assignment into an assignment to itself by passing its own ID
+	// to `multica issue create`.
+	if originType.Valid && originType.String == "quick_create" {
+		var errMsg string
+		assigneeType, assigneeID, errMsg = h.quickCreateAssignee(r.Context(), r, wsUUID, creatorType, actualCreatorID, originID, assigneeType, assigneeID)
+		if errMsg != "" {
+			writeError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+	}
+
+	if status, msg := h.validateAssigneePair(r.Context(), r, workspaceID, assigneeType, assigneeID); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+
 	// Prefix is workspace-level; pre-compute once so both the broadcast
 	// payload builder and the HTTP response share the same value.
 	prefix := h.getIssuePrefix(r.Context(), wsUUID)
@@ -2613,6 +2730,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		AttachmentIDs:  attachmentIDs,
 		LabelIDs:       labelIDs,
 		AllowDuplicate: req.AllowDuplicate,
+		FDL:            fdlLaunch,
 	}, service.IssueCreateOpts{
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
@@ -2910,6 +3028,24 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	projectChanged := req.ProjectID != nil && uuidToString(prevIssue.ProjectID) != uuidToString(issue.ProjectID)
 	descriptionChanged := req.Description != nil && textToPtr(prevIssue.Description) != resp.Description
 	titleChanged := req.Title != nil && prevIssue.Title != issue.Title
+	if issue.OrchestrationMode == "fdl" && statusChanged && issue.Status == "cancelled" {
+		// FDL cancellation is explicit: first prevent every direct task (including
+		// pre-ack rows) from starting, then leave a daemon-visible termination
+		// request. Ordinary Squad issue cancellation deliberately keeps its
+		// historical non-interrupting behavior.
+		if err := h.TaskService.CancelTasksForIssue(r.Context(), issue.ID); err != nil {
+			slog.Warn("cancel FDL issue tasks failed", append(logger.RequestAttrs(r), "issue_id", id, "error", err)...)
+			writeError(w, http.StatusInternalServerError, "failed to cancel FDL issue tasks")
+			return
+		}
+		if _, err := h.Queries.RequestFDLIssueRunCancellation(r.Context(), db.RequestFDLIssueRunCancellationParams{
+			IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, Reason: "Issue cancelled by a Multica member",
+		}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("request FDL Controller cancellation failed", append(logger.RequestAttrs(r), "issue_id", id, "error", err)...)
+			writeError(w, http.StatusInternalServerError, "failed to request FDL cancellation")
+			return
+		}
+	}
 	prevStartDate := dateToPtr(prevIssue.StartDate)
 	startDateChanged := prevStartDate != resp.StartDate && (prevStartDate == nil) != (resp.StartDate == nil) ||
 		(prevStartDate != nil && resp.StartDate != nil && *prevStartDate != *resp.StartDate)

@@ -276,6 +276,29 @@ WHERE COALESCE(sqlc.narg(worktree_context)::jsonb ->> 'worktree_id', '') = ''
    OR EXISTS (SELECT 1 FROM worktree_guard)
 RETURNING *;
 
+-- name: CreateFDLAgentTask :one
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, issue_id, status, priority, max_attempts,
+    force_fresh_session, is_leader_task, handoff_note, context, worktree_context
+) VALUES (
+    $1, $2, $3, 'fdl_pending_ack', $4, 1,
+    TRUE, FALSE, sqlc.arg(handoff_note)::text,
+    jsonb_build_object('fdl_direct', true, 'fdl_role', sqlc.arg(fdl_role)::text, 'fdl_dispatch_key', sqlc.arg(fdl_dispatch_key)::text), sqlc.arg(worktree_context)::jsonb
+)
+RETURNING *;
+
+-- name: GetFDLAgentTaskByDispatchKey :one
+SELECT * FROM agent_task_queue
+WHERE issue_id = $1 AND runtime_id = $2 AND context ->> 'fdl_dispatch_key' = sqlc.arg(fdl_dispatch_key)::text
+ORDER BY created_at DESC
+LIMIT 1;
+
+-- name: ActivateFDLAgentTask :one
+UPDATE agent_task_queue
+SET status = 'queued'
+WHERE id = $1 AND status = 'fdl_pending_ack'
+RETURNING *;
+
 -- name: CreateQuickCreateTask :one
 -- Quick-create tasks have no issue / chat / autopilot link; the entire job
 -- description (prompt, requester, workspace) lives in context JSONB. The
@@ -451,7 +474,7 @@ RETURNING *;
 -- this now; a status flip to cancelled/done no longer does (MUL-4465).
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
-WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+WHERE issue_id = $1 AND status IN ('fdl_pending_ack', 'queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
 -- name: CancelAgentTasksByIssueAndAgent :many
@@ -461,7 +484,7 @@ RETURNING *;
 -- still-running @-mention agent on the same issue.
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
-WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+WHERE issue_id = $1 AND agent_id = $2 AND status IN ('fdl_pending_ack', 'queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
 -- name: CancelAgentTasksByAgent :many
@@ -472,7 +495,7 @@ RETURNING *;
 -- behave consistently.
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
-WHERE agent_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+WHERE agent_id = $1 AND status IN ('fdl_pending_ack', 'queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
 -- name: CancelAgentTasksByTriggerComment :many
@@ -912,7 +935,7 @@ RETURNING t.*;
 -- name: CancelAgentTask :one
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
-WHERE id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+WHERE id = $1 AND status IN ('fdl_pending_ack', 'queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
 -- name: MarkChatFinalizeDeferred :one

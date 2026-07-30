@@ -48,6 +48,8 @@ import type {
   CodeWorktree,
   ListCodeWorktreesResponse,
   CodeWorktreeInspection,
+  FDLDeliveryProfile,
+  FDLIssueRun,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
@@ -468,6 +470,9 @@ export const IssueSchema = z.object({
   creator_id: z.string(),
   parent_issue_id: z.string().nullable(),
   project_id: z.string().nullable(),
+  // Existing backends predate FDL. Missing fields remain the legacy workflow.
+  orchestration_mode: z.enum(["squad", "fdl"]).catch("squad"),
+  fdl_run_id: z.string().nullable().default(null),
   position: z.number(),
   // Older backends predate `stage`; default to null so a missing field parses
   // cleanly into the non-optional Issue.stage (number | null).
@@ -507,6 +512,40 @@ export const CreateIssueResponseSchema = IssueSchema.extend({
   id: z.string().min(1),
   labels: z.array(LabelSchema).optional().catch(undefined),
 }).loose();
+
+const FDLRoleBindingSchema = z.object({
+  role: z.string(),
+  agent_id: z.string(),
+}).loose();
+
+export const FDLDeliveryProfileSchema: z.ZodType<FDLDeliveryProfile> = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  squad_id: z.string(),
+  controller_config: z.record(z.string(), z.unknown()).default({}),
+  role_bindings: z.array(FDLRoleBindingSchema).default([]),
+  created_by: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose() as z.ZodType<FDLDeliveryProfile>;
+
+export const FDLDeliveryProfilesSchema = z.array(FDLDeliveryProfileSchema).default([]);
+
+export const FDLIssueRunSchema: z.ZodType<FDLIssueRun> = z.object({
+  id: z.string(),
+  issue_id: z.string(),
+  profile_id: z.string(),
+  fdl_run_id: z.string().nullable().default(null),
+  status: z.string(),
+  phase: z.string(),
+  state_projection: z.record(z.string(), z.unknown()).default({}),
+  created_at: z.string(),
+  updated_at: z.string(),
+  started_at: z.string().nullable().default(null),
+  finished_at: z.string().nullable().default(null),
+}).loose() as z.ZodType<FDLIssueRun>;
 
 export const EMPTY_LIST_ISSUES_RESPONSE: ListIssuesResponse = {
   issues: [],

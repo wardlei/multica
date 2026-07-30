@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_fdl_delivery_profile_workspace_name_active;

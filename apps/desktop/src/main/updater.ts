@@ -17,6 +17,13 @@ import {
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
+// electron-updater logs its development-mode no-op through console.info. A
+// detached Electron dev process can inherit a closed stdout pipe, turning that
+// harmless message into an unhandled EPIPE in the main process.
+if (!app.isPackaged) {
+  autoUpdater.logger = null;
+}
+
 // Windows arm64 ships its own update metadata channel because
 // electron-builder's `latest.yml` is not arch-suffixed on Windows — both
 // arches would otherwise collide on the same file in the GitHub Release.

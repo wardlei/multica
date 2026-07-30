@@ -454,6 +454,205 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
 	return resp.Status, nil
 }
 
+// PendingFDLIssueRun is the daemon-only frozen launch contract for an FDL
+// delivery. It deliberately excludes executor-private run roots, leases,
+// result directories, and Controller submission tokens.
+type PendingFDLIssueRun struct {
+	ID               string          `json:"id"`
+	IssueID          string          `json:"issue_id"`
+	ProfileID        string          `json:"profile_id"`
+	FDLRunID         *string         `json:"fdl_run_id,omitempty"`
+	Status           string          `json:"status"`
+	Phase            string          `json:"phase"`
+	ProfileSnapshot  json.RawMessage `json:"profile_snapshot"`
+	WorktreeSnapshot json.RawMessage `json:"worktree_snapshot"`
+	RuntimeSnapshot  json.RawMessage `json:"runtime_snapshot"`
+	IssueSnapshot    json.RawMessage `json:"issue_snapshot"`
+	// FDLRuntimeID authenticates follow-up FDL calls through the daemon's
+	// already registered runtime. It is transport-only and never persisted.
+	FDLRuntimeID string `json:"-"`
+}
+
+// ListPendingFDLIssueRuns returns only deliveries pinned to this daemon by
+// their frozen code worktree.
+func (c *Client) ListPendingFDLIssueRuns(ctx context.Context, runtimeID string) ([]PendingFDLIssueRun, error) {
+	var response struct {
+		Runs []PendingFDLIssueRun `json:"runs"`
+	}
+	if err := c.getFDLJSON(ctx, "/api/daemon/fdl-runs/pending", runtimeID, &response); err != nil {
+		return nil, err
+	}
+	for i := range response.Runs {
+		response.Runs[i].FDLRuntimeID = runtimeID
+	}
+	return response.Runs, nil
+}
+
+// ListActiveFDLIssueRuns is the daemon's bounded recovery view. Its response
+// still excludes local executor bindings and Controller submission tokens.
+func (c *Client) ListActiveFDLIssueRuns(ctx context.Context, runtimeID string) ([]PendingFDLIssueRun, error) {
+	var response struct {
+		Runs []PendingFDLIssueRun `json:"runs"`
+	}
+	if err := c.getFDLJSON(ctx, "/api/daemon/fdl-runs/active", runtimeID, &response); err != nil {
+		return nil, err
+	}
+	for i := range response.Runs {
+		response.Runs[i].FDLRuntimeID = runtimeID
+	}
+	return response.Runs, nil
+}
+
+type initializeFDLIssueRunResponse struct {
+	ID       string `json:"id"`
+	IssueID  string `json:"issue_id"`
+	FDLRunID string `json:"fdl_run_id"`
+	Status   string `json:"status"`
+	Phase    string `json:"phase"`
+}
+
+// InitializeFDLIssueRun records the Controller run ID after a local executor
+// has successfully created and preflighted its external run root.
+func (c *Client) InitializeFDLIssueRun(ctx context.Context, runtimeID, id, fdlRunID string) error {
+	return c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/initialize", id), runtimeID, map[string]string{
+		"fdl_run_id": fdlRunID,
+	}, &initializeFDLIssueRunResponse{})
+}
+
+// FDLProjection reports display-safe lifecycle facts. It is not Controller
+// state and must not contain result bindings, tokens, or local paths.
+type FDLProjection struct {
+	Status           string   `json:"status"`
+	Phase            string   `json:"phase"`
+	WaitingReason    string   `json:"waiting_reason,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	ActionType       string   `json:"action_type,omitempty"`
+	DecisionActionID string   `json:"decision_action_id,omitempty"`
+	DecisionKind     string   `json:"decision_kind,omitempty"`
+	AllowedDecisions []string `json:"allowed_decisions,omitempty"`
+}
+
+func (c *Client) UpdateFDLIssueRunProjection(ctx context.Context, runtimeID, id string, projection FDLProjection) error {
+	return c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/projection", id), runtimeID, projection, nil)
+}
+
+func (c *Client) CancelFDLIssueRun(ctx context.Context, runtimeID, id, reason string) error {
+	return c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/cancelled", id), runtimeID, map[string]string{"reason": reason}, nil)
+}
+
+func (c *Client) ReportFDLIssueRunRecovery(ctx context.Context, runtimeID, id, reason string) error {
+	return c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/recovery", id), runtimeID, map[string]string{"reason": reason}, nil)
+}
+
+// CreateFDLAgentTask sends a token-free direct dispatch. The caller retains
+// Controller work-item IDs, submission tokens, and result-directory bindings.
+func (c *Client) CreateFDLAgentTask(ctx context.Context, runtimeID, runID, role, instructions, dispatchKey string, priority int32, executionWorkspace json.RawMessage) (string, error) {
+	var response struct {
+		TaskID string `json:"task_id"`
+	}
+	request := map[string]any{
+		"role": role, "instructions": instructions, "dispatch_key": dispatchKey, "priority": priority,
+	}
+	if len(executionWorkspace) > 0 {
+		request["execution_workspace"] = json.RawMessage(executionWorkspace)
+	}
+	if err := c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks", runID), runtimeID, request, &response); err != nil {
+		return "", err
+	}
+	if response.TaskID == "" {
+		return "", fmt.Errorf("FDL direct task response omitted task_id")
+	}
+	return response.TaskID, nil
+}
+
+func (c *Client) ActivateFDLAgentTask(ctx context.Context, runtimeID, runID, taskID string) error {
+	return c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/tasks/%s/activate", runID, taskID), runtimeID, map[string]any{}, nil)
+}
+
+// FDLHumanDecision is an executor-private receipt. It contains no Controller
+// envelope, work identity, submission token, or run-root path.
+type FDLHumanDecision struct {
+	ID          string  `json:"id"`
+	ActionID    string  `json:"action_id"`
+	Decision    string  `json:"decision"`
+	Status      string  `json:"status"`
+	OperationID *string `json:"operation_id,omitempty"`
+}
+
+func (c *Client) GetFDLHumanDecision(ctx context.Context, runtimeID, runID, actionID string) (FDLHumanDecision, error) {
+	var response FDLHumanDecision
+	if err := c.getFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/decisions/%s", runID, actionID), runtimeID, &response); err != nil {
+		return FDLHumanDecision{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ClaimFDLHumanDecision(ctx context.Context, runtimeID, runID, decisionID, operationID string) (FDLHumanDecision, error) {
+	var response FDLHumanDecision
+	if err := c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/decisions/%s/claim", runID, decisionID), runtimeID, map[string]string{"operation_id": operationID}, &response); err != nil {
+		return FDLHumanDecision{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CompleteFDLHumanDecision(ctx context.Context, runtimeID, runID, decisionID, operationID string) error {
+	return c.postFDLJSON(ctx, fmt.Sprintf("/api/daemon/fdl-runs/%s/decisions/%s/complete", runID, decisionID), runtimeID, map[string]string{"operation_id": operationID}, nil)
+}
+
+const fdlRuntimeHeader = "X-Multica-FDL-Runtime-ID"
+
+// getFDLJSON and postFDLJSON bind every native FDL request to one registered
+// local runtime. This lets PAT-authenticated daemons prove their daemon ID
+// without exposing controller identities to the normal task protocol.
+func (c *Client) getFDLJSON(ctx context.Context, path, runtimeID string, respBody any) error {
+	return c.fdlJSON(ctx, http.MethodGet, path, runtimeID, nil, respBody)
+}
+
+func (c *Client) postFDLJSON(ctx context.Context, path, runtimeID string, reqBody, respBody any) error {
+	return c.fdlJSON(ctx, http.MethodPost, path, runtimeID, reqBody, respBody)
+}
+
+func (c *Client) fdlJSON(ctx context.Context, method, path, runtimeID string, reqBody, respBody any) error {
+	if strings.TrimSpace(runtimeID) == "" {
+		return errors.New("FDL runtime identity is required")
+	}
+	var body io.Reader
+	if reqBody != nil {
+		data, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return err
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	c.setIdentityHeaders(req)
+	req.Header.Set(fdlRuntimeHeader, runtimeID)
+
+	response, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return &requestError{Method: method, Path: path, StatusCode: response.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	if respBody == nil {
+		_, _ = io.Copy(io.Discard, response.Body)
+		return nil
+	}
+	return json.NewDecoder(response.Body).Decode(respBody)
+}
+
 // HeartbeatResponse, PendingUpdate, etc. alias the wire types so HTTP and WS
 // heartbeat paths share a single type and a single decoder shape. Aliases
 // (rather than wrappers) keep call sites unchanged.

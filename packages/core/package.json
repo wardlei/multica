@@ -112,6 +112,7 @@
     "./utils": "./utils.ts",
     "./constants/*": "./constants/*.ts",
     "./feature-flags": "./feature-flags/index.ts",
+    "./fdl": "./fdl/index.ts",
     "./platform": "./platform/index.ts",
     "./shortcuts": "./shortcuts/index.ts",
     "./analytics": "./analytics/index.ts",

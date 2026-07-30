@@ -18,6 +18,8 @@ SELECT count(*) FROM agent_task_queue WHERE status IN ('queued','dispatched','ru
 INSERT INTO code_worktree_inspection (workspace_id,daemon_id,local_path,worktree_id,expected_updated_at,status,expires_at,created_by) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7) RETURNING *;
 -- name: GetCodeWorktreeInspectionInWorkspace :one
 SELECT * FROM code_worktree_inspection WHERE id=$1 AND workspace_id=$2;
+-- name: GetCodeWorktreeInspection :one
+SELECT * FROM code_worktree_inspection WHERE id=$1;
 -- name: CompleteCodeWorktreeInspection :one
 UPDATE code_worktree_inspection SET status=CASE WHEN $8::text='' THEN 'completed' ELSE 'failed' END,canonical_path=$3,repository_url=$4,branch=$5,head_sha=$6,is_dirty=$7,error=NULLIF($8::text,''),completed_at=now() WHERE id=$1 AND workspace_id=$2 AND daemon_id=$9 AND status='pending' AND expires_at>now() RETURNING *;
 -- name: ConsumeCodeWorktreeInspection :one

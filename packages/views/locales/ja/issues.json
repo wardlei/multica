@@ -595,5 +595,17 @@
     "row_backlog_hint": "エージェントを一時停止のままにします",
     "row_todo_label": "未着手",
     "row_todo_hint": "エージェントを開始します"
+  },
+  "fdl_delivery": {
+    "title": "FDL デリバリー",
+    "controller_authority": "FDL Controller がワークフロー判断と復旧を管理します。",
+    "status": "ステータス",
+    "phase": "フェーズ",
+    "waiting_reason": "待機理由",
+    "unavailable": "デリバリーの状態投影を一時的に取得できません。",
+    "decision_required": "判断が必要です",
+    "decision_option": "{{decision}}",
+    "decision_submitted": "FDL の判断をローカル実行者向けに記録しました。",
+    "decision_failed": "FDL の判断を記録できませんでした。"
   }
 }

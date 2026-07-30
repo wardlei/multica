@@ -5214,6 +5214,38 @@ func TestPrepareLocalWorkDir(t *testing.T) {
 	}
 }
 
+func TestPrepareReadOnlyLocalWorkDirLeavesEvidenceUntouched(t *testing.T) {
+	workspacesRoot := t.TempDir()
+	evidenceDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(evidenceDir, "snapshot.txt"), []byte("frozen\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(evidenceDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(evidenceDir, 0o755) })
+
+	env, err := Prepare(PrepareParams{
+		WorkspacesRoot:       workspacesRoot,
+		WorkspaceID:          "ws-readonly",
+		TaskID:               "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		AgentName:            "FDL Reviewer",
+		LocalWorkDir:         evidenceDir,
+		ReadOnlyLocalWorkDir: true,
+		Task:                 TaskContextForEnv{IssueID: "issue-readonly"},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("Prepare read-only local workdir: %v", err)
+	}
+	defer env.Cleanup(true)
+	if !env.ReadOnlyLocalDirectory || !env.LocalDirectory || env.WorkDir != evidenceDir {
+		t.Fatalf("unexpected read-only environment: %#v", env)
+	}
+	if _, err := os.Stat(filepath.Join(evidenceDir, ".agent_context")); !os.IsNotExist(err) {
+		t.Fatalf("read-only evidence workspace received sidecars: %v", err)
+	}
+}
+
 func TestEnvironmentCleanupPreservesLocalDirectory(t *testing.T) {
 	t.Parallel()
 	workspacesRoot := t.TempDir()

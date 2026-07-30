@@ -66,16 +66,19 @@ type Task struct {
 	// prompt set in Settings → General). Server populates this on every claim
 	// regardless of task kind so the daemon can inject `## Workspace Context`
 	// into the brief. Empty when the owner hasn't set one.
-	WorkspaceContext         string                 `json:"workspace_context,omitempty"`
-	ThreadName               string                 `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
-	Agent                    *AgentData             `json:"agent,omitempty"`
-	ConnectedApps            []ConnectedAppData     `json:"connected_apps,omitempty"` // per-run app capabilities mounted through runtime MCP overlays
-	Repos                    []RepoData             `json:"repos,omitempty"`
-	ProjectID                string                 `json:"project_id,omitempty"`                  // active project for this task, when present
-	ProjectTitle             string                 `json:"project_title,omitempty"`               // human-readable project title for context injection
-	ProjectDescription       string                 `json:"project_description,omitempty"`         // durable project-level context injected into the brief
-	ProjectResources         []ProjectResourceData  `json:"project_resources,omitempty"`           // project-scoped resources to expose to the agent
-	WorktreeContext          json.RawMessage        `json:"worktree_context,omitempty"`            // immutable expected local Git checkout
+	WorkspaceContext   string                `json:"workspace_context,omitempty"`
+	ThreadName         string                `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
+	Agent              *AgentData            `json:"agent,omitempty"`
+	ConnectedApps      []ConnectedAppData    `json:"connected_apps,omitempty"` // per-run app capabilities mounted through runtime MCP overlays
+	Repos              []RepoData            `json:"repos,omitempty"`
+	ProjectID          string                `json:"project_id,omitempty"`          // active project for this task, when present
+	ProjectTitle       string                `json:"project_title,omitempty"`       // human-readable project title for context injection
+	ProjectDescription string                `json:"project_description,omitempty"` // durable project-level context injected into the brief
+	ProjectResources   []ProjectResourceData `json:"project_resources,omitempty"`   // project-scoped resources to expose to the agent
+	WorktreeContext    json.RawMessage       `json:"worktree_context,omitempty"`    // immutable expected local Git checkout
+	// FDLDirect is set only on the daemon claim projection for a task that is
+	// bound to the FDL Controller. It selects the no-comments prompt path.
+	FDLDirect                bool                   `json:"fdl_direct,omitempty"`
 	IsLeaderTask             bool                   `json:"is_leader_task,omitempty"`              // true when executing in the squad-leader coordinator role
 	PriorSessionID           string                 `json:"prior_session_id,omitempty"`            // Claude session ID from a previous task on this issue
 	PriorWorkDir             string                 `json:"prior_work_dir,omitempty"`              // work_dir from a previous task on this issue

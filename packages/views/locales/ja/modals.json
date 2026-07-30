@@ -179,6 +179,11 @@
     "set_project": "プロジェクトを設定...",
     "customize_fields": "フィールドをカスタマイズ...",
     "custom_properties": "カスタムプロパティ",
+    "fdl": {
+      "aria": "デリバリーモードを選択",
+      "squad_mode": "スクワッドコラボレーション",
+      "project_required": "FDL デリバリーにはクリーンなコード worktree を持つプロジェクトが必要です。"
+    },
     "remove_parent": "親を削除",
     "set_parent_picker": {
       "title": "親イシューを設定",

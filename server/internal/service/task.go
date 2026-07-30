@@ -2708,7 +2708,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	// tasks, TriggerCommentID threads the fallback under the original comment;
 	// for assignment-triggered tasks it is NULL and the fallback is top-level.
 	// Chat tasks have no IssueID and are handled separately below.
-	if task.IssueID.Valid {
+	if task.IssueID.Valid && !IsFDLDirectTask(task) {
 		suppressNoActionComment, err := HasSquadLeaderNoActionEvaluationForTask(ctx, s.Queries, task)
 		if err != nil {
 			slog.Warn("checking squad leader no_action evaluation failed",
@@ -2779,6 +2779,16 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCompleted, task)
 
 	return &task, nil
+}
+
+// IsFDLDirectTask identifies the narrow token-free task projection created by
+// the FDL Executor. These tasks report to the Controller through the private
+// executor binding, never through Issue comments or Squad leader recovery.
+func IsFDLDirectTask(task db.AgentTaskQueue) bool {
+	var context struct {
+		FDLDirect bool `json:"fdl_direct"`
+	}
+	return json.Unmarshal(task.Context, &context) == nil && context.FDLDirect
 }
 
 // chatNoResponseFallback is the non-empty English body stored on a no_response
@@ -3101,7 +3111,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	// the new task will surface its own status to the user, and we don't
 	// want to spam the issue with "task timed out" messages on every
 	// daemon hiccup.
-	if errMsg != "" && task.IssueID.Valid && retried == nil {
+	if errMsg != "" && task.IssueID.Valid && retried == nil && !IsFDLDirectTask(task) {
 		s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(errMsg), "system", task.TriggerCommentID, task.ID)
 	}
 
