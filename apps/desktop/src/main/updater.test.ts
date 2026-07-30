@@ -19,12 +19,14 @@ const ctx = vi.hoisted(() => ({
   quitAndInstall: vi.fn(),
   getVersion: vi.fn(() => "0.3.17"),
   userDataPath: "",
+  updater: null as { logger: unknown } | null,
 }));
 
 vi.mock("electron-updater", () => {
   const autoUpdater = {
     autoDownload: false,
     autoInstallOnAppQuit: false,
+    logger: {} as unknown,
     channel: undefined as string | undefined,
     allowDowngrade: false,
     on: vi.fn((event: string, handler: Handler) => {
@@ -37,6 +39,7 @@ vi.mock("electron-updater", () => {
     downloadUpdate: ctx.downloadUpdate,
     quitAndInstall: ctx.quitAndInstall,
   };
+  ctx.updater = autoUpdater;
   return { autoUpdater };
 });
 
@@ -44,6 +47,7 @@ vi.mock("electron", () => ({
   app: {
     getVersion: ctx.getVersion,
     getPath: vi.fn(() => ctx.userDataPath),
+    isPackaged: false,
   },
   BrowserWindow: class BrowserWindow {},
   ipcMain: {
@@ -277,5 +281,11 @@ describe("setupAutoUpdater", () => {
     expect(() => emitUpdater("download-progress", { percent: 42 })).toThrow(
       "boom",
     );
+  });
+});
+
+describe("development updater logging", () => {
+  it("does not write updater logs to a detached development stdout pipe", () => {
+    expect(ctx.updater?.logger).toBeNull();
   });
 });
