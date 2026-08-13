@@ -75,8 +75,8 @@ The HTTP body (`CreateAgentRequest`) accepts: `name`, `description`,
 | `instructions` | `agent.instructions` | none | daemon → provider at claim time |
 | `avatar_url` | `agent.avatar_url` | none; an explicit non-empty value is preserved, while omitted/empty creates a random `emoji:<glyph>` avatar | catalog/listing UI only — NOT the runtime prompt |
 | `runtime_id` | `agent.runtime_id` | required (400) + must resolve to a runtime in this workspace | selects runtime/provider |
-| `model` | `agent.model` (nullable) | none beyond runtime support | daemon reads; empty = runtime default |
-| `thinking_level` | `agent.thinking_level` (nullable) | provider-level enum; unknown literal → 400 | daemon; empty = runtime default |
+| `model` | `agent.model` (nullable) | none beyond runtime support | daemon reads; Codex create default = `gpt-5.6-sol`; other runtimes empty = runtime default |
+| `thinking_level` | `agent.thinking_level` (nullable) | provider-level enum; unknown literal → 400 | daemon; Codex create default = `medium`; other runtimes empty = runtime default |
 | `service_tier` | `agent.service_tier` (nullable) | Codex-only safe token; other providers reject; exact model/tier pair checked by daemon | daemon → Codex app-server; empty = local Codex config |
 | `custom_args` | `agent.custom_args` (JSON array) | JSON shape checked CLI-side; server stores as-is | daemon (extra CLI switches); defaults to `[]` |
 | `runtime_config` | `agent.runtime_config` (JSON) | JSON shape checked CLI-side; server stores as-is | runtime-specific config; defaults to `{}` |
@@ -91,6 +91,11 @@ Defaults when omitted: `runtime_config` → `{}`, `custom_env` → `{}`,
 (all materialized server-side before the insert). `custom_args`/`runtime_config`
 are typed `[]string`/`any` and marshaled as-is — the JSON-shape rejection
 happens in the CLI, not the create handler.
+
+Codex agents additionally default to `model=gpt-5.6-sol` and
+`thinking_level=medium` when those values are empty. Explicit non-empty values
+still win. The same defaults apply to manual, template, and legacy onboarding
+creation paths.
 
 `thinking_level` is validated only at the provider level: fixed-catalog
 providers reject an unrecognized literal, while dynamic-catalog providers such
