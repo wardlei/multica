@@ -213,6 +213,7 @@ func (h *Handler) BootstrapOnboardingRuntime(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	if !assistant.ID.Valid {
+		model, thinkingLevel := applyAgentRuntimeDefaults(runtime.Provider, "", "")
 		assistant, err = qtx.CreateAgent(r.Context(), db.CreateAgentParams{
 			WorkspaceID:        wsUUID,
 			Name:               onboardingAssistantName,
@@ -228,7 +229,8 @@ func (h *Handler) BootstrapOnboardingRuntime(w http.ResponseWriter, r *http.Requ
 			CustomEnv:          []byte("{}"),
 			CustomArgs:         []byte("[]"),
 			McpConfig:          nil,
-			Model:              pgtype.Text{},
+			Model:              pgtype.Text{String: model, Valid: model != ""},
+			ThinkingLevel:      pgtype.Text{String: thinkingLevel, Valid: thinkingLevel != ""},
 		})
 		if err != nil {
 			slog.Warn("bootstrap onboarding (shim): create assistant failed", append(logger.RequestAttrs(r), "error", err, "workspace_id", req.WorkspaceID)...)

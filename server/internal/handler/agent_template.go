@@ -223,6 +223,7 @@ func (h *Handler) CreateAgentFromTemplate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusForbidden, "this runtime is private; only its owner or a workspace admin can create agents on it")
 		return
 	}
+	model, thinkingLevel := applyAgentRuntimeDefaults(runtime.Provider, req.Model, "")
 
 	// Resolve invocation permission (MUL-3963) — mirrors CreateAgent so the
 	// two entry points can't drift. permission_mode is authoritative when
@@ -473,7 +474,8 @@ func (h *Handler) CreateAgentFromTemplate(w http.ResponseWriter, r *http.Request
 		CustomEnv:          ce,
 		CustomArgs:         ca,
 		McpConfig:          nil,
-		Model:              pgtype.Text{String: req.Model, Valid: req.Model != ""},
+		Model:              pgtype.Text{String: model, Valid: model != ""},
+		ThinkingLevel:      pgtype.Text{String: thinkingLevel, Valid: thinkingLevel != ""},
 	})
 	if err != nil {
 		// Mirror handler/agent.go:CreateAgent: when the duplicate is the

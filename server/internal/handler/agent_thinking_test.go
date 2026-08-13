@@ -98,6 +98,45 @@ func TestCreateAgent_ThinkingLevel_ValidationConsistency(t *testing.T) {
 	})
 }
 
+func TestApplyAgentRuntimeDefaults(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     string
+		model        string
+		thinking     string
+		wantModel    string
+		wantThinking string
+	}{
+		{
+			name:         "Codex defaults",
+			provider:     "codex",
+			wantModel:    "gpt-5.6-sol",
+			wantThinking: "medium",
+		},
+		{
+			name:         "Codex explicit values win",
+			provider:     "codex",
+			model:        "gpt-5.6-terra",
+			thinking:     "high",
+			wantModel:    "gpt-5.6-terra",
+			wantThinking: "high",
+		},
+		{
+			name:     "other providers unchanged",
+			provider: "claude",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model, thinking := applyAgentRuntimeDefaults(tt.provider, tt.model, tt.thinking)
+			if model != tt.wantModel || thinking != tt.wantThinking {
+				t.Fatalf("defaults = (%q, %q), want (%q, %q)", model, thinking, tt.wantModel, tt.wantThinking)
+			}
+		})
+	}
+}
+
 func TestAgentServiceTierValidationAndTriState(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")

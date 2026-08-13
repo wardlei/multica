@@ -964,6 +964,24 @@ type CreateAgentRequest struct {
 	SkillIDs []string `json:"skill_ids"`
 }
 
+const (
+	defaultCodexAgentModel         = "gpt-5.6-sol"
+	defaultCodexAgentThinkingLevel = "medium"
+)
+
+func applyAgentRuntimeDefaults(provider, model, thinkingLevel string) (string, string) {
+	if provider != "codex" {
+		return model, thinkingLevel
+	}
+	if model == "" {
+		model = defaultCodexAgentModel
+	}
+	if thinkingLevel == "" {
+		thinkingLevel = defaultCodexAgentThinkingLevel
+	}
+	return model, thinkingLevel
+}
+
 func decodeJSONBodyWithRawFields(body io.Reader, dst any) (map[string]json.RawMessage, error) {
 	payload, err := io.ReadAll(body)
 	if err != nil {
@@ -1056,6 +1074,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "this runtime is private; only its owner or a workspace admin can create agents on it")
 		return
 	}
+	req.Model, req.ThinkingLevel = applyAgentRuntimeDefaults(runtime.Provider, req.Model, req.ThinkingLevel)
 
 	// thinking_level validation: fixed-enum providers reject unknown literals;
 	// dynamic-catalog providers (Codex/OpenCode) reject malformed tokens here.
